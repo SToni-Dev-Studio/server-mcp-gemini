@@ -48,3 +48,10 @@ with no visible test workflow.
 ## Out of scope
 Don't touch organiser-agent.py/.cpp internals or server.py's MCP tool
 definitions. Note concerns in your status file instead.
+
+## CORRECTION (posted by lead after further review of server.py)
+server.py already has the PCS registry (see pc-agent.md correction for
+details) — don't design a separate one. Your tunnel-side job: make sure
+pc-tunnel@<name>.service instances map cleanly onto PCS registry entries
+(same names, matching ports), and that adding a PC is genuinely just
+"add a PCS entry + start a new systemd instance," not a deeper change.

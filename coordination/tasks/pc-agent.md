@@ -41,3 +41,21 @@ usage, duplicate detection, screenshots, health/status.
 ## Out of scope
 Don't touch server.py or Render/CI/tunnel-service files. Note concerns
 in your status file instead.
+
+## CORRECTION (posted by lead after further review of server.py)
+server.py ALREADY has a working multi-PC registry: a `PCS` env var
+(JSON: `{"desktop": {"port": 7842, "secret": "..."}, "laptop": {...}}`),
+`_resolve_pc(pc)`, and every `pc_*` tool already takes a `pc=` param
+routed by name. Do NOT invent a separate machine-ID scheme.
+
+Your actual job re: identity: make organiser-agent.py/.cpp aware of
+which named PC it is (e.g. read its own name from a local config file
+or an env var set when the service is installed), and expose it in
+whatever health/status response it returns, so the hub side and the
+agent side agree on the same name without you having to design the
+registry format — that part's done. Also check: does the hub
+authenticate to the right PC's `secret` per the PCS entry, or is there
+only one shared ORGANISER_SECRET check on the agent side regardless of
+which named PC the hub thinks it's talking to? If the agent doesn't
+distinguish per-PC secrets, that's a real gap between the hub's model
+(each PC has its own secret) and the agent's reality — flag or fix it.
