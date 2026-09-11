@@ -46,6 +46,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import secrets
 import html as _html
 import json
 import os
@@ -1338,9 +1339,23 @@ async def run_diagnostics() -> str:
 # store needed for a single-admin personal dashboard.
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip() or os.environ.get("MCP_SERVER_PASSWORD", "").strip()
+
+# SECURITY: no hardcoded fallback secret. A static in-source string here
+# would let anyone who has read this file forge a valid admin cookie
+# (compute hmac(known_secret, expiry)) even though the login *form* is
+# disabled when ADMIN_PASSWORD is unset -- verification must be gated
+# the same way login is, or "disabled login" is theater.
+#
+# If no real secret is configured, generate one per-process instead. It
+# won't validate any cookie forged against a guessable string, and it
+# won't survive a restart (which is fine -- with no real secret configured
+# there should be no durable admin session anyway).
 _ADMIN_COOKIE_SECRET = (
-    os.environ.get("ADMIN_COOKIE_SECRET", "").strip() or ADMIN_PASSWORD or "insecure-dev-secret-set-ADMIN_PASSWORD"
+    os.environ.get("ADMIN_COOKIE_SECRET", "").strip()
+    or ADMIN_PASSWORD
+    or secrets.token_hex(32)
 )
+_ADMIN_AUTH_CONFIGURED = bool(os.environ.get("ADMIN_COOKIE_SECRET", "").strip() or ADMIN_PASSWORD)
 _ADMIN_SESSION_TTL = 60 * 60 * 12  # 12 hours
 _ADMIN_COOKIE_NAME = "admin_session"
 
@@ -1359,6 +1374,8 @@ def _admin_make_cookie() -> str:
 
 
 def _admin_cookie_valid(cookie_value: str | None) -> bool:
+    if not _ADMIN_AUTH_CONFIGURED:
+        return False
     if not cookie_value or "." not in cookie_value:
         return False
     expiry_s, sig = cookie_value.split(".", 1)
