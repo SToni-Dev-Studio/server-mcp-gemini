@@ -1,148 +1,118 @@
-# GitHub Codespaces MCP Server
+# codespaces-mcp
 
-A small remote MCP server exposing four narrow tools for GitHub
-Codespaces, instead of one broad "do anything" tool:
+A remote MCP server that gives Claude ~50 narrow, purpose-built tools —
+instead of one broad "do anything" tool — for managing personal
+infrastructure: GitHub Codespaces, a Linux home server, one or more
+Windows PCs, and a Plex media server, all through a single HTTPS
+endpoint. Includes a password-gated browser admin dashboard for
+configuring the deployment itself.
 
-| Tool | What it does | Suggested permission |
-|---|---|---|
-| `list_codespaces` | Lists your codespaces, their repo, and state | Always allow (read-only) |
-| `create_codespace` | Creates a codespace from a repo | Needs approval |
-| `stop_codespace` | Stops a running codespace | Needs approval |
-| `exec_command` | Runs a shell command inside a codespace | Needs approval (strongly recommended) |
+Read next:
+- **`ARCHITECTURE.md`** — how the pieces fit together, auth model, known
+  limitations. Start here if you're modifying anything.
+- **`BUILD_AND_SETUP.md`** — step-by-step setup: building the PC agent,
+  the Linux tunnel, Render env vars, verifying it end-to-end.
+- **`SKILL.md`** — full tool-by-tool reference (what Claude reads to use
+  this server well).
 
-## Why this fixes the original problem
+## What it does, briefly
 
-Claude's own sandboxed environment couldn't complete the Codespaces
-tunnel negotiation needed for `gh codespace ssh`. This server runs
-as its own independent service — wherever *you* deploy it — so it
-isn't subject to that sandbox's network restrictions. Claude just
-calls it over MCP like any other connector.
+| Area | Example tools |
+|---|---|
+| GitHub Codespaces | `list_codespaces`, `exec_command`, `create_git_commit_and_push` |
+| Linux home server | `server_status`, `server_run_command`, `server_tail_log` |
+| Windows PC(s) | `pc_list_files`, `pc_move_file`, `pc__screenshot` |
+| Plex | `plex_search`, `plex_scan_library` |
+| File transfer | `transfer__pc_to_sandbox`, `transfer__sandbox_to_server` |
+| Diagnostics / admin | `run_diagnostics`, browser dashboard at `/admin` |
+
+See `SKILL.md` for the complete list with parameters.
+
+## Quick start
+
+```bash
+git clone <this repo>
+cd server-mcp-claude
+pip install -r requirements.txt
+cp .secrets.example .secrets   # fill in whichever sections you need —
+                                # every subsystem is independently optional
+python server.py                # reads PORT from .secrets, defaults to 8000
+```
+
+That gets `server.py` running locally with no auth required (no host
+env vars detected = local dev mode). Point an MCP client at
+`http://localhost:8000/mcp`.
+
+For an actual deployment (Render) reachable by Claude, plus the Windows
+PC agent and Linux tunnel setup, follow **`BUILD_AND_SETUP.md`** from
+the top — there's no shortcut version, since the PC/server pieces each
+need their own machine-side setup.
 
 ## Auth model
 
-The server does **not** hardcode any token. It reads your GitHub PAT
-from the incoming request's `Authorization: Bearer <token>` header
-(or `X-GitHub-Token` as a fallback). When you add this as a Custom
-Connector in Claude, you'll paste the token into Claude's own
-"Request headers" field — Claude stores it securely and attaches it
-to every call. The token never sits in chat text again.
+Three independent layers — see `ARCHITECTURE.md` for the full picture:
 
-**Use a fine-grained PAT scoped only to Codespaces**, ideally on a
-single repo, not your whole account. Revoke and re-issue it if you
-ever suspect it's leaked.
+1. **MCP endpoint** (`/mcp`): `MCP_SERVER_PASSWORD`, sent as
+   `Authorization: Bearer <token>`. Required once this is reachable from
+   the public internet — the server refuses every request rather than
+   serving unauthenticated if this is unset on a detected public host
+   (Render/Fly).
+2. **Admin dashboard** (`/admin`): separate cookie-based login,
+   `ADMIN_PASSWORD` (falls back to `MCP_SERVER_PASSWORD` if unset).
+3. **Each PC's organiser-agent**: `X-Organiser-Secret` header, matched
+   per-PC via the `PCS` registry.
 
-## Required: set your deployed hostname
-
-The SDK blocks any request whose `Host` header isn't `localhost` by
-default (DNS-rebinding protection). The server now auto-detects this
-on Render (`RENDER_EXTERNAL_HOSTNAME`) and Fly.io (`FLY_APP_NAME`), so
-on those two platforms it should just work with zero config. On any
-other host, or to override the auto-detected value, set it manually
-(no `https://`, no path):
-
-```bash
-# Render: Dashboard > your service > Environment
-# Fly:
-fly secrets set MCP_ALLOWED_HOST=your-app.fly.dev
-```
-
-Without this on an unrecognized platform, every request to `/mcp`
-returns `Invalid Host header`. Visit `https://your-host/` after
-deploying — it now returns a small JSON status page (instead of a
-confusing 404) that tells you whether an allowed host was detected.
-
-## Troubleshooting: everything 404s
-
-If your logs show every request hitting `/`, `/register`, or
-`/.well-known/...` and **none hitting `/mcp`**, the connector URL in
-Claude is wrong. The MCP endpoint is at `/mcp`, not the bare domain:
-
-- ✅ `https://your-app.example.com/mcp`
-- ❌ `https://your-app.example.com`
-
-A GET to the bare `/` now returns a JSON hint instead of a 404, and
-`/healthz` is available for platform health checks that expect 200 at
-a fixed path.
+GitHub API access uses up to three PATs (`GITHUB_TOKEN`,
+`_SECONDARY`, `_TERTIARY`) with automatic fallback on 401/403.
 
 ## Deploy it
 
-Any host that can run a Docker container and give you a public
-HTTPS URL works — Railway, Fly.io, Render, a small VPS, etc.
-
-Example with Railway (arbitrary choice, others work the same way):
-
-```bash
-# from this folder
-railway init
-railway up
-```
-
-Or manually with Docker anywhere:
+Render is the documented, supported target — see `BUILD_AND_SETUP.md`
+§5 for the full env var list. A `Dockerfile` and `fly.toml` are also
+present; Fly.io would plausibly work (the server auto-detects
+`FLY_APP_NAME`) but isn't confirmed maintained — see `ARCHITECTURE.md`.
 
 ```bash
 docker build -t codespaces-mcp .
-docker run -p 8000:8000 -e PORT=8000 codespaces-mcp
-```
-
-Put a reverse proxy / the platform's built-in HTTPS in front of it
-so you get a `https://your-app.example.com/mcp` URL.
-
-## Connect it to Claude
-
-1. In Claude: **Customize > Connectors > + > Add custom connector**
-2. Name it (e.g. "GitHub Codespaces")
-3. URL: `https://your-app.example.com/mcp`
-4. Under **Request headers**, add:
-   - Name: `Authorization`
-   - Value: `Bearer <your fine-grained PAT>`
-5. Save, then go set each tool's permission level (Always allow /
-   Needs approval) under the connector's settings — set `exec_command`
-   to **Needs approval**.
-
-## Config via .secrets
-
-All settings can go in one `.secrets` file instead of hunting through a
-platform's dashboard each time:
-
-```bash
-cp .secrets.example .secrets
-# then fill in GITHUB_TOKEN (and MCP_ALLOWED_HOST if not on Render/Fly)
-```
-
-`.secrets` is gitignored -- it holds a live token, never commit it.
-`load_dotenv()` only fills in vars that aren't already set, so real
-platform env vars (Render/Fly dashboard secrets) always win over
-`.secrets` -- safe to leave the file in place everywhere, including prod,
-without it ever overriding a real secret.
-
-For Docker, don't bake `.secrets` into the image (it'd ship your token
-inside the image layers). Pass it at run time instead:
-
-```bash
 docker run -p 8000:8000 --env-file .secrets codespaces-mcp
 ```
 
-Render and Fly both have their own secrets UI -- set values there for
-deployed environments, and reserve `.secrets` for local runs.
+Don't bake `.secrets` into the image — pass it at container run time
+(`--env-file`), or use your platform's own secrets UI for a real
+deployment.
+
+## Connect it to Claude
+
+1. **Customize > Connectors > + > Add custom connector**
+2. Name it, URL: `https://<your-deployed-host>/mcp`
+3. Under **Request headers**: `Authorization: Bearer <MCP_SERVER_PASSWORD>`
+4. Set per-tool permission levels under the connector's settings — at
+   minimum, set every `*_run_command` tool to **Needs approval** (see
+   "Known limitations" in `ARCHITECTURE.md` for why).
+
+## Known limitations
+
+The full, honest list — including the two organiser-agent
+implementations, the Fly-vs-Render status, and what isn't protected
+against — lives in **`ARCHITECTURE.md`**. Highlights:
+
+- `organiser-agent.py` (the Python build) has no path-traversal/
+  protected-path checks. Use `organiser-agent.cpp` for anything real.
+- `*_run_command` tools (PC and Linux server both) are intentionally
+  close to unrestricted shell access — treat their permission level
+  accordingly.
+- No CI test/lint pipeline for `server.py` yet.
 
 ## Local testing
 
 ```bash
 pip install -r requirements.txt
-cp .secrets.example .secrets   # fill in GITHUB_TOKEN
-python server.py       # reads PORT from .secrets, defaults to 8000
+cp .secrets.example .secrets
+python server.py
 ```
 
-Then point a local MCP client (or curl, per the MCP Streamable HTTP
-spec) at `http://localhost:8000/mcp`.
+The single existing regression test can be run directly:
 
-## Security notes
-
-- `exec_command` can run arbitrary shell commands with whatever
-  permissions the codespace's default user has. Treat it like giving
-  someone a terminal — because that's what it is. Keep it on "Needs
-  approval."
-- Don't expose this server without the header-auth requirement, or
-  anyone with the URL could act as whoever's token is configured.
-- Consider scoping the PAT to a single repo if the bot only needs
-  one.
+```bash
+python tests/test_admin_cookie_auth.py
+```
