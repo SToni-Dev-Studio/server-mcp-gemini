@@ -1,5 +1,9 @@
 # Build & Setup Guide — organiser-agent C++ + Multi-PC + Admin Dashboard
 
+See `ARCHITECTURE.md` first if you haven't — it covers the auth model,
+request routing, and known limitations this guide assumes. See
+`SKILL.md` for the full tool reference once this is running.
+
 ## 1. Build on Windows (MSVC)
 
 Open **Developer Command Prompt for VS** (search in Start menu):
@@ -16,6 +20,18 @@ Links gdi32.lib/user32.lib automatically via `#pragma comment` in the source
 **No Python, no pip, no Flask, no ngrok.**
 
 Do this once per PC you want Claude to reach (see §4 for multi-PC).
+
+> **Build `organiser-agent.cpp`, not `organiser-agent.py`.** The Python
+> file is a legacy reference implementation — it has no path-traversal
+> protection and its own comments describe an older ngrok-based
+> deployment model that doesn't match §4/§6 below. See `ARCHITECTURE.md`
+> for the full comparison. Don't run it as a production agent.
+
+Don't want to build it yourself? A prebuilt `organiser-agent.exe` is
+published on every push to `main` and on every tagged release — see
+"Getting a prebuilt build" below, or use the installer script in
+`scripts/install-organiser-agent.ps1` (§1b) to fetch, verify, and
+install it in one step.
 
 ---
 
@@ -34,10 +50,39 @@ Launching it afterwards does **not** need elevation — only this copy step does
 
 ---
 
+## 1b. Or: use the installer script (recommended)
+
+`scripts/install-organiser-agent.ps1` does §1/§1a/§3 in one step: it
+downloads the latest (or a specific tagged) `organiser-agent.exe` from
+this repo's GitHub Releases, verifies its SHA-256 checksum against the
+release's published `.sha256` file, installs it to
+`C:\Program Files\OrganiserAgent\`, preserves your existing
+`ORGANISER_SECRET`/`ORGANISER_PORT` if you're upgrading rather than
+installing fresh, registers/refreshes the Scheduled Task from §3, and
+verifies the agent actually responds on `/status` afterward.
+
+```powershell
+# Run in an elevated PowerShell prompt:
+irm https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install-organiser-agent.ps1 | iex
+
+# Or, having downloaded the script:
+.\install-organiser-agent.ps1 -Secret "your_secret_here" -Port 7842
+```
+
+See the script's own header comment for the full flag list (`-Version`
+to pin a specific release tag instead of "latest", `-Uninstall`, etc).
+If you'd rather do each step by hand (or the installer fails and you
+need to see why), §1–§3 below are the manual equivalent.
+
+---
+
 ## 2. Set the secret and port (each PC needs its own)
 
 Pick a port for this PC (7842 for the first one, 7843 for a second, etc.)
-and a secret — these get matched up in the `PCS` registry later.
+and a secret — these get matched up in the `PCS` registry later. **The
+secret you set here and the `secret` you put in that PC's `PCS` entry on
+the Render side must match exactly — nothing else enforces the pairing**
+(see "Known limitations" in `ARCHITECTURE.md`).
 
 ```cmd
 set ORGANISER_SECRET=<a_secret_just_for_this_pc>
@@ -90,6 +135,9 @@ To verify it's running:
 ```powershell
 Get-ScheduledTask -TaskName "OrganiserAgent" | Select State
 ```
+
+(The installer script in §1b does this step for you and keeps the task
+name/secret/port in sync on upgrade.)
 
 ---
 
@@ -155,7 +203,8 @@ server; `secret` must match that PC's `ORGANISER_SECRET`.
 as a fallback if `PCS` isn't set at all — but `PCS` is the supported path
 going forward, especially once you have more than one PC.)
 
-Other env vars worth setting at the same time:
+Other env vars worth setting at the same time — see `.secrets.example`
+for the complete list with descriptions:
 ```
 MCP_SERVER_PASSWORD   — required in production; the server refuses all
                         /mcp requests if this is unset on a public host
@@ -165,8 +214,12 @@ RENDER_API_KEY        — lets /admin manage this service's own env vars
                         and trigger redeploys (get one from Render →
                         Account Settings → API Keys)
 RENDER_SERVICE_ID     — optional; defaults to this service's real ID
-                        (srv-da11cupt0dsc73aq2qq0) already
+                        already
 ```
+
+Render is the documented/supported deployment target — see
+`ARCHITECTURE.md` for the current Fly.io status (present in the repo,
+not confirmed maintained).
 
 ---
 
@@ -192,6 +245,8 @@ No PC is ever publicly reachable, and Render never opens a raw connection
 to any PC or even to the server's public/Tailscale IP for this traffic —
 only the one already-authenticated `tailscale ssh` channel is used, for
 everything. Only the Linux server needs to be reachable (via Tailscale).
+Full detail (including exactly how a request is packaged for that SSH
+channel) is in `ARCHITECTURE.md`.
 
 ---
 
@@ -224,3 +279,33 @@ Platform: Windows
 ```
 
 Or just run `run_diagnostics` for a full pass/fail sweep of everything at once.
+
+---
+
+## Getting a prebuilt organiser-agent.exe
+
+Every push to `main` that touches `organiser-agent.cpp` publishes
+`organiser-agent.exe` to a rolling `latest` GitHub Release (see
+`.github/workflows/build-organiser-agent.yml`). Every tagged release
+(`vX.Y.Z`) additionally publishes it — alongside a checksum file and
+`server.py`/docs — as part of that version (see
+`.github/workflows/release.yml`). Either way:
+
+```
+https://github.com/<owner>/<repo>/releases/latest/download/organiser-agent.exe
+https://github.com/<owner>/<repo>/releases/latest/download/organiser-agent.exe.sha256
+```
+
+`scripts/install-organiser-agent.ps1` (§1b) fetches and verifies this
+for you; grab it manually only if you have a reason to skip the
+installer.
+
+---
+
+## Known limitations
+
+See `ARCHITECTURE.md`'s "Known limitations" section for the full,
+current list (PC secret pairing isn't enforced, `*_run_command` tools
+are intentionally close to unrestricted, no CI test/lint step for
+`server.py` yet, Fly vs Render status, etc.) — kept in one place instead
+of duplicated here so it doesn't drift.
