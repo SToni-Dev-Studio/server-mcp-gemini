@@ -1,0 +1,1689 @@
+"""
+GitHub Codespaces MCP Server
+-----------------------------
+Exposes narrow, named tools for managing and executing commands in
+GitHub Codespaces, the user's Linux home server, one or more Windows
+PCs (via organiser-agent), and Plex — with multi-account GitHub
+fallback, password protection, and a browser-based admin dashboard.
+
+Auth:
+    - MCP Server Auth: Validates `MCP_SERVER_PASSWORD` against incoming
+      Authorization header (set via 'OAuth Client Secret' in Claude).
+      Compared in constant time. If unset while running on a public
+      host (RENDER_EXTERNAL_HOSTNAME/MCP_ALLOWED_HOST present), the
+      server fails CLOSED rather than silently allowing every request.
+    - GitHub Auth: Uses primary `GITHUB_TOKEN`, secondary
+      `GITHUB_TOKEN_SECONDARY`, and tertiary `GITHUB_TOKEN_TERTIARY`
+      with automatic failover on billing/auth errors.
+    - Admin dashboard Auth: Separate cookie-based login, gated by
+      `ADMIN_PASSWORD` (falls back to `MCP_SERVER_PASSWORD` if unset).
+
+PC organiser-agent routing:
+    Render never talks to a PC directly. Every pc_* tool call goes
+    Render -> tailscale ssh -> Linux server -> loopback tunnel -> PC.
+    See the "PC File Organiser Tools" section below for the full
+    diagram. Multiple PCs are supported via the `PCS` env var (JSON
+    registry) and a `pc` parameter on every pc_*/transfer__*_pc tool.
+
+Plex:
+    Set PLEX_URL (e.g. http://192.168.101.105:32400) and PLEX_TOKEN.
+
+Server Management:
+    Set SERVER_HOST and SERVER_USER; auth via SSH_PRIVATE_KEY (raw key
+    text) or SERVER_SSH_KEY (path), routed over `tailscale ssh`.
+
+Admin dashboard (configure everything from a browser):
+    Visit /admin on this service's URL. Requires RENDER_API_KEY (and
+    optionally RENDER_SERVICE_ID, which defaults to this service) to
+    manage Render env vars and trigger redeploys from the page.
+
+Run locally:
+    export PORT=8000
+    python server.py
+"""
+
+import asyncio
+import base64
+import hashlib
+import hmac
+import html as _html
+import json
+import os
+import shlex
+import shutil
+import time
+
+import httpx
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+from mcp.server.streamable_http import TransportSecuritySettings
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.routing import Route
+
+load_dotenv()
+
+GITHUB_API = "https://api.github.com"
+RENDER_API = "https://api.render.com/v1"
+
+PLEX_URL = os.environ.get("PLEX_URL", "http://192.168.101.105:32400").rstrip("/")
+PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
+
+SERVER_HOST = os.environ.get("SERVER_HOST", "192.168.101.105")
+SERVER_USER = os.environ.get("SERVER_USER", "sepisotoni")
+SERVER_SSH_KEY = os.environ.get("SERVER_SSH_KEY", "~/.ssh/id_rsa")
+
+# This service's own Render identity — used by the admin dashboard to manage
+# itself by default. Override RENDER_SERVICE_ID if you rename/fork the service.
+RENDER_API_KEY = os.environ.get("RENDER_API_KEY", "").strip()
+RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "srv-da11cupt0dsc73aq2qq0").strip()
+
+# If SSH_PRIVATE_KEY env var is set (raw key text), write it to a temp file
+_SSH_PRIVATE_KEY_CONTENT = os.environ.get("SSH_PRIVATE_KEY", "")
+_SSH_KEY_PATH = os.environ.get("SSH_KEY_PATH", "/tmp/render_mcp_key")
+if _SSH_PRIVATE_KEY_CONTENT:
+    import stat as _stat
+    os.makedirs(os.path.dirname(_SSH_KEY_PATH), exist_ok=True)
+    with open(_SSH_KEY_PATH, "w") as _kf:
+        _kf.write(_SSH_PRIVATE_KEY_CONTENT.strip() + "\n")
+    os.chmod(_SSH_KEY_PATH, _stat.S_IRUSR | _stat.S_IWUSR)
+    SERVER_SSH_KEY = _SSH_KEY_PATH
+
+
+# ---------------------------------------------------------------------------
+# PC Registry (multi-PC support)
+# ---------------------------------------------------------------------------
+#
+# Configure via the PCS env var — a JSON object mapping a short name to
+# {"port": <local tunnel port on the server>, "secret": <ORGANISER_SECRET
+# for that PC's agent>}. Each PC gets its own pc-tunnel@<name>.service
+# instance on the Linux server, forwarding a distinct loopback port to
+# that PC. Example:
+#
+#   PCS={"desktop": {"port": 7842, "secret": "abc"}, "laptop": {"port": 7843, "secret": "xyz"}}
+#
+# If PCS is not set, falls back to a single "default" PC built from the
+# legacy ORGANISER_PORT / ORGANISER_SECRET env vars (port 7842 if unset).
+# Every pc_* / transfer__*_pc tool takes an optional `pc` parameter
+# (default "default") to pick which one it talks to.
+
+_PCS_RAW = os.environ.get("PCS", "").strip()
+_PC_REGISTRY: dict = {}
+if _PCS_RAW:
+    try:
+        _PC_REGISTRY = json.loads(_PCS_RAW)
+    except json.JSONDecodeError:
+        print("WARNING: PCS env var is not valid JSON — ignoring it, falling back to single-PC mode.")
+
+if not _PC_REGISTRY:
+    _PC_REGISTRY = {
+        "default": {
+            "port": int(os.environ.get("ORGANISER_PORT", "7842")),
+            "secret": os.environ.get("ORGANISER_SECRET", ""),
+        }
+    }
+
+
+def _resolve_pc(pc: str) -> dict:
+    if pc not in _PC_REGISTRY:
+        available = ", ".join(sorted(_PC_REGISTRY.keys())) or "(none configured)"
+        raise RuntimeError(f"Unknown PC '{pc}'. Configured PCs: {available}")
+    return _PC_REGISTRY[pc]
+
+
+# ---------------------------------------------------------------------------
+# Host Detection & Security Settings
+# ---------------------------------------------------------------------------
+
+def _detect_allowed_host() -> str:
+    explicit = os.environ.get("MCP_ALLOWED_HOST", "").strip()
+    if explicit:
+        return explicit
+    render_host = os.environ.get("RENDER_EXTERNAL_HOSTNAME", "").strip()
+    if render_host:
+        return render_host
+    fly_app = os.environ.get("FLY_APP_NAME", "").strip()
+    if fly_app:
+        return f"{fly_app}.fly.dev"
+    return ""
+
+
+_allowed_host = _detect_allowed_host()
+_is_public_deployment = bool(_allowed_host)
+if not _allowed_host:
+    print("WARNING: no MCP_ALLOWED_HOST detected. Remote requests to /mcp will fail.")
+else:
+    print(f"MCP allowed host: {_allowed_host}")
+
+_transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=["localhost", "127.0.0.1"] + ([_allowed_host] if _allowed_host else []),
+    allowed_origins=["*"],
+)
+
+mcp = FastMCP("github-codespaces", transport_security=_transport_security)
+
+
+# ---------------------------------------------------------------------------
+# Authentication Middleware
+# ---------------------------------------------------------------------------
+
+class PasswordAuthMiddleware(BaseHTTPMiddleware):
+    """
+    Protects the MCP endpoint with a shared-secret bearer token, compared
+    in constant time. /admin has its own cookie-based login (see below)
+    so it's exempted here rather than double-gated.
+
+    Fail-safe behaviour: if MCP_SERVER_PASSWORD is unset AND this looks
+    like a public deployment (a host was detected for Render/Fly), every
+    non-exempt request is rejected — an unset password should not mean
+    "wide open" once this is actually reachable from the internet. Local
+    dev (`python server.py` with no host env vars) still works with no
+    password needed.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "OPTIONS":
+            return await call_next(request)
+        if request.url.path in ("/", "/healthz") or request.url.path.startswith("/admin"):
+            return await call_next(request)
+
+        expected_password = os.environ.get("MCP_SERVER_PASSWORD", "").strip()
+
+        if not expected_password:
+            if _is_public_deployment:
+                return JSONResponse(
+                    {"error": "Server misconfigured: MCP_SERVER_PASSWORD is not set on a public deployment."},
+                    status_code=503,
+                )
+            return await call_next(request)
+
+        auth_header = request.headers.get("authorization", "")
+        token = auth_header.replace("Bearer ", "").strip() if auth_header.startswith("Bearer ") else auth_header.strip()
+
+        if not hmac.compare_digest(token, expected_password):
+            return JSONResponse(
+                {"error": "Unauthorized: Invalid or missing server password."},
+                status_code=401,
+            )
+        return await call_next(request)
+
+
+# ---------------------------------------------------------------------------
+# Shell-Quoting Helper
+# ---------------------------------------------------------------------------
+#
+# Every function below that builds a command string for `_ssh_server` or
+# the codespace `exec_command` SSH path uses shlex.quote() on any
+# user-supplied value. Without it, a path/message containing a single
+# quote (e.g. a commit message like "fix user's login bug", or a Windows
+# folder with an apostrophe) breaks out of the surrounding quotes and the
+# remainder gets interpreted as shell syntax — a real injection risk, not
+# just a correctness bug, since several of these run with sudo.
+
+def _q(value) -> str:
+    """shlex.quote, coercing non-strings first (e.g. int line counts)."""
+    return shlex.quote(str(value))
+
+
+# ---------------------------------------------------------------------------
+# Token Resolution & Fallback Helpers
+# ---------------------------------------------------------------------------
+
+def _get_token(account: str = "auto") -> tuple[str, str]:
+    """Returns (token, account_name) — supports primary, secondary, tertiary."""
+    primary = os.environ.get("GITHUB_TOKEN", "").strip()
+    secondary = os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()
+    tertiary = os.environ.get("GITHUB_TOKEN_TERTIARY", "").strip()
+
+    if account == "secondary":
+        if not secondary:
+            raise RuntimeError("GITHUB_TOKEN_SECONDARY is not configured.")
+        return secondary, "secondary"
+
+    if account == "tertiary":
+        if not tertiary:
+            raise RuntimeError("GITHUB_TOKEN_TERTIARY is not configured.")
+        return tertiary, "tertiary"
+
+    if account == "primary":
+        if not primary:
+            raise RuntimeError("GITHUB_TOKEN is not configured.")
+        return primary, "primary"
+
+    # auto: try primary → secondary → tertiary
+    if primary:
+        return primary, "primary"
+    if secondary:
+        return secondary, "secondary"
+    if tertiary:
+        return tertiary, "tertiary"
+
+    raise RuntimeError("No GitHub tokens configured in environment.")
+
+
+def _gh_headers(token: str) -> dict:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+
+
+async def _gh_request_with_fallback(
+    method: str, path: str, json_body: dict | None = None, account: str = "auto"
+) -> dict:
+    """
+    Executes an HTTP request against the GitHub API with automatic
+    fallback through all tokens on 401/403.
+
+    Supports GET/POST/PATCH/DELETE properly — a previous version of this
+    function only distinguished GET vs "everything else routes through
+    POST", which meant set_machine_type (a PATCH) was silently sent as a
+    POST and would have been rejected by GitHub's API.
+    """
+    token, used_account = _get_token(account)
+    method = method.upper()
+
+    async def _do(tok: str) -> httpx.Response:
+        async with httpx.AsyncClient() as client:
+            kwargs = {"headers": _gh_headers(tok), "timeout": 60}
+            if json_body is not None and method in ("POST", "PATCH", "PUT"):
+                kwargs["json"] = json_body
+            return await client.request(method, f"{GITHUB_API}{path}", **kwargs)
+
+    resp = await _do(token)
+
+    if resp.status_code in (401, 403) and account == "auto":
+        for fallback_account, env_name in [
+            ("secondary", "GITHUB_TOKEN_SECONDARY"),
+            ("tertiary", "GITHUB_TOKEN_TERTIARY"),
+        ]:
+            fallback_token = os.environ.get(env_name, "").strip()
+            if fallback_token and fallback_token != token:
+                print(f"Token failed with HTTP {resp.status_code}. Trying {fallback_account}...")
+                resp = await _do(fallback_token)
+                if resp.status_code not in (401, 403):
+                    break
+
+    resp.raise_for_status()
+    return resp.json() if resp.content else {}
+
+
+@mcp.tool()
+async def check_account_status() -> str:
+    """Check validity and user identities for primary, secondary, and tertiary GitHub tokens."""
+    results = []
+    tokens_to_check = [
+        ("primary", os.environ.get("GITHUB_TOKEN", "").strip()),
+        ("secondary", os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()),
+        ("tertiary", os.environ.get("GITHUB_TOKEN_TERTIARY", "").strip()),
+    ]
+
+    async with httpx.AsyncClient() as client:
+        for label, token in tokens_to_check:
+            if not token:
+                results.append(f"• **{label.capitalize()} Token**: Not configured.")
+                continue
+            try:
+                resp = await client.get(f"{GITHUB_API}/user", headers=_gh_headers(token), timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    login = data.get("login", "unknown")
+                    name = data.get("name") or login
+                    results.append(f"• **{label.capitalize()} Token**: ✅ Active (User: `{login}` - {name})")
+                else:
+                    results.append(f"• **{label.capitalize()} Token**: ❌ Invalid/Expired (HTTP {resp.status_code})")
+            except Exception as e:
+                results.append(f"• **{label.capitalize()} Token**: ⚠️ Network error ({type(e).__name__})")
+
+    return "\n".join(results)
+
+
+# ---------------------------------------------------------------------------
+# SSH Helper for Linux Server
+# ---------------------------------------------------------------------------
+
+async def _ssh_server(command: str, timeout: int = 60) -> str:
+    """Run a command on the home Linux server via tailscale ssh."""
+    ssh_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
+    proc = await asyncio.create_subprocess_exec(
+        *ssh_cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        output = (stdout.decode() + stderr.decode()).strip()
+        return output or f"(exited {proc.returncode}, no output)"
+    except asyncio.TimeoutError:
+        proc.kill()
+        return f"Command timed out after {timeout}s"
+
+
+# ---------------------------------------------------------------------------
+# Codespace Lifecycle Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def list_codespaces(account: str = "auto") -> str:
+    """List caller's GitHub Codespaces: name, repo, state, and machine spec."""
+    data = await _gh_request_with_fallback("GET", "/user/codespaces", account=account)
+    lines = []
+    for cs in data.get("codespaces", []):
+        lines.append(
+            f"- {cs['name']} | repo: {cs['repository']['full_name']} | "
+            f"state: {cs['state']} | machine: {cs['machine']['display_name']}"
+        )
+    return "\n".join(lines) if lines else "No codespaces found."
+
+
+@mcp.tool()
+async def create_codespace(repo_full_name: str, branch: str = "main", machine_type: str = "", account: str = "auto") -> str:
+    """
+    Create a new codespace for a given repository.
+    machine_type — optional (e.g. 'standardLinux32Gb', 'premiumLinux'); left
+    blank uses the repo's default. Use this for AI/heavy workloads too —
+    just pass a bigger machine_type, then use exec_command to install
+    whatever you need (Ollama, etc.) once it's up.
+    """
+    body = {"ref": branch}
+    if machine_type:
+        body["machine"] = machine_type
+    data = await _gh_request_with_fallback(
+        "POST",
+        f"/repos/{repo_full_name}/codespaces",
+        json_body=body,
+        account=account,
+    )
+    return f"Created codespace '{data.get('name')}' (state: {data.get('state')})"
+
+
+@mcp.tool()
+async def stop_codespace(codespace_name: str, account: str = "auto") -> str:
+    """Stop a running codespace by name."""
+    await _gh_request_with_fallback("POST", f"/user/codespaces/{codespace_name}/stop", account=account)
+    return f"Stop requested for '{codespace_name}'."
+
+
+@mcp.tool()
+async def rebuild_codespace(codespace_name: str, account: str = "auto") -> str:
+    """Trigger a full devcontainer rebuild inside a codespace."""
+    data = await _gh_request_with_fallback("POST", f"/user/codespaces/{codespace_name}/rebuild", account=account)
+    return f"Rebuild initiated for '{codespace_name}'. State: {data.get('state', 'queued')}"
+
+
+@mcp.tool()
+async def set_machine_type(codespace_name: str, machine_type: str, account: str = "auto") -> str:
+    """Scale machine specs (e.g. 'standardLinux32Gb' or 'premiumLinux')."""
+    await _gh_request_with_fallback(
+        "PATCH",
+        f"/user/codespaces/{codespace_name}",
+        json_body={"machine": machine_type},
+        account=account,
+    )
+    return f"Machine updated to '{machine_type}' for '{codespace_name}'."
+
+
+# ---------------------------------------------------------------------------
+# Shell Execution & File I/O Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def exec_command(codespace_name: str, command: str, timeout_seconds: int = 60, account: str = "auto") -> str:
+    """Run a single shell command inside a codespace asynchronously via SSH."""
+    if not shutil.which("gh"):
+        raise RuntimeError("The 'gh' CLI is not installed on this server.")
+
+    token, used_account = _get_token(account)
+
+    async def _run_ssh(tok: str):
+        env = os.environ.copy()
+        env["GH_TOKEN"] = tok
+        proc = await asyncio.create_subprocess_exec(
+            "gh", "codespace", "ssh", "--codespace", codespace_name, "--", command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            return proc.returncode, (stdout.decode() + stderr.decode()).strip()
+        except asyncio.TimeoutError:
+            proc.kill()
+            raise TimeoutError(f"Command timed out after {timeout_seconds} seconds.")
+
+    returncode, output = await _run_ssh(token)
+
+    if returncode != 0 and account == "auto" and used_account == "primary":
+        secondary_token = os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()
+        if secondary_token and ("auth" in output.lower() or "denied" in output.lower() or "billing" in output.lower()):
+            print("SSH execution failed on primary. Retrying with secondary...")
+            returncode, output = await _run_ssh(secondary_token)
+
+    return output or f"(command exited {returncode}, no output)"
+
+
+@mcp.tool()
+async def read_codespace_file(codespace_name: str, file_path: str, account: str = "auto") -> str:
+    """Read contents of a remote file in the codespace."""
+    return await exec_command(codespace_name, f"cat {_q(file_path)}", timeout_seconds=15, account=account)
+
+
+@mcp.tool()
+async def write_codespace_file(codespace_name: str, file_path: str, content: str, account: str = "auto") -> str:
+    """Safely write/overwrite content to a file in the codespace using base64 encoding."""
+    b64_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+    cmd = f"echo {_q(b64_content)} | base64 -d > {_q(file_path)}"
+    await exec_command(codespace_name, cmd, timeout_seconds=15, account=account)
+    return f"Successfully wrote {len(content)} characters to '{file_path}'."
+
+
+@mcp.tool()
+async def list_workspace_files(codespace_name: str, path: str = ".", account: str = "auto") -> str:
+    """List directory contents or file tree inside the codespace."""
+    return await exec_command(
+        codespace_name, f"find {_q(path)} -maxdepth 2 -not -path '*/.*'", timeout_seconds=15, account=account
+    )
+
+
+# ---------------------------------------------------------------------------
+# Git & Port Management Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def get_git_status(codespace_name: str, repo_path: str = ".", account: str = "auto") -> str:
+    """Get concise git status and branch info in the codespace working directory."""
+    return await exec_command(
+        codespace_name, f"cd {_q(repo_path)} && git status --short -b", timeout_seconds=15, account=account
+    )
+
+
+@mcp.tool()
+async def create_git_commit_and_push(
+    codespace_name: str, commit_message: str, repo_path: str = ".", branch: str = "", account: str = "auto"
+) -> str:
+    """Stage tracked changes, commit, and push to remote."""
+    push_args = f"origin {_q(branch)}" if branch else ""
+    cmd = f"cd {_q(repo_path)} && git add -u && git commit -m {_q(commit_message)} && git push {push_args}"
+    return await exec_command(codespace_name, cmd, timeout_seconds=30, account=account)
+
+
+@mcp.tool()
+async def list_forwarded_ports(codespace_name: str, account: str = "auto") -> str:
+    """List currently forwarded network ports and dev server addresses."""
+    return await exec_command(
+        codespace_name, f"gh codespace ports -c {_q(codespace_name)}", timeout_seconds=15, account=account
+    )
+
+
+# ---------------------------------------------------------------------------
+# Plex Control Tools
+# ---------------------------------------------------------------------------
+
+def _plex_headers() -> dict:
+    return {"X-Plex-Token": PLEX_TOKEN, "Accept": "application/json"}
+
+
+@mcp.tool()
+async def plex_search(query: str, media_type: str = "all") -> str:
+    """Search the Plex library for movies, shows, or anime by name."""
+    if not PLEX_TOKEN:
+        return "PLEX_TOKEN not configured in environment."
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{PLEX_URL}/search",
+                params={"query": query, "X-Plex-Token": PLEX_TOKEN},
+                headers={"Accept": "application/json"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        return f"Plex unreachable: {e}"
+
+    results = []
+    items = data.get("MediaContainer", {}).get("Metadata", [])
+    for item in items[:10]:
+        title = item.get("title", "Unknown")
+        year = item.get("year", "")
+        media = item.get("type", "")
+        key = item.get("ratingKey", "")
+        results.append(f"- [{key}] {title} ({year}) — {media}")
+
+    return "\n".join(results) if results else f"No results found for '{query}'."
+
+
+@mcp.tool()
+async def plex_get_libraries() -> str:
+    """List all Plex libraries (anime, movies, TV shows, etc.)."""
+    if not PLEX_TOKEN:
+        return "PLEX_TOKEN not configured in environment."
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{PLEX_URL}/library/sections",
+                params={"X-Plex-Token": PLEX_TOKEN},
+                headers={"Accept": "application/json"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        return f"Plex unreachable: {e}"
+
+    sections = data.get("MediaContainer", {}).get("Directory", [])
+    lines = [f"- [{s.get('key')}] {s.get('title')} ({s.get('type')})" for s in sections]
+    return "\n".join(lines) if lines else "No libraries found."
+
+
+@mcp.tool()
+async def plex_scan_library(library_key: str = "all") -> str:
+    """Trigger a Plex library scan to detect new anime/media files."""
+    if not PLEX_TOKEN:
+        return "PLEX_TOKEN not configured in environment."
+
+    url = f"{PLEX_URL}/library/sections/all/refresh" if library_key == "all" else f"{PLEX_URL}/library/sections/{library_key}/refresh"
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(url, params={"X-Plex-Token": PLEX_TOKEN}, timeout=15)
+    except httpx.HTTPError as e:
+        return f"Plex unreachable: {e}"
+
+    return f"Library scan triggered (section: {library_key}). Status: {resp.status_code}"
+
+
+@mcp.tool()
+async def plex_get_status() -> str:
+    """Get Plex server status, version, and active sessions."""
+    if not PLEX_TOKEN:
+        return "PLEX_TOKEN not configured in environment."
+
+    try:
+        async with httpx.AsyncClient() as client:
+            info_resp = await client.get(
+                f"{PLEX_URL}/", params={"X-Plex-Token": PLEX_TOKEN}, headers={"Accept": "application/json"}, timeout=15
+            )
+            info_resp.raise_for_status()
+            sess_resp = await client.get(
+                f"{PLEX_URL}/status/sessions",
+                params={"X-Plex-Token": PLEX_TOKEN},
+                headers={"Accept": "application/json"},
+                timeout=15,
+            )
+            sess_resp.raise_for_status()
+    except httpx.HTTPError as e:
+        return f"Plex unreachable: {e}"
+
+    info = info_resp.json().get("MediaContainer", {})
+    sessions = sess_resp.json().get("MediaContainer", {})
+    session_count = sessions.get("size", 0)
+    active = sessions.get("Metadata", [])
+
+    lines = [
+        f"**Plex Server:** {info.get('friendlyName', 'Unknown')}",
+        f"**Version:** {info.get('version', 'Unknown')}",
+        f"**Active Sessions:** {session_count}",
+    ]
+    for s in active:
+        user = s.get("User", {}).get("title", "Unknown")
+        title = s.get("title", "Unknown")
+        state = s.get("Player", {}).get("state", "unknown")
+        lines.append(f"  - {user} watching '{title}' ({state})")
+
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def plex_get_recently_added(count: int = 10) -> str:
+    """Get recently added media in Plex library."""
+    if not PLEX_TOKEN:
+        return "PLEX_TOKEN not configured in environment."
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"{PLEX_URL}/library/recentlyAdded",
+                params={"X-Plex-Token": PLEX_TOKEN, "X-Plex-Container-Size": count},
+                headers={"Accept": "application/json"},
+                timeout=15,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPError as e:
+        return f"Plex unreachable: {e}"
+
+    items = data.get("MediaContainer", {}).get("Metadata", [])
+    lines = []
+    for item in items:
+        title = item.get("title", "Unknown")
+        added = item.get("addedAt", "")
+        media_type = item.get("type", "")
+        lines.append(f"- {title} ({media_type}) — added: {added}")
+
+    return "\n".join(lines) if lines else "No recently added media."
+
+
+# ---------------------------------------------------------------------------
+# Server Management Tools
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def server_status() -> str:
+    """Get status of all services on the home Linux server (Plex, Sonarr, qBittorrent, etc.)."""
+    cmd = (
+        "systemctl is-active plexmediaserver sonarr jackett qbittorrent plex-watch "
+        "| paste - - - - - "
+        "| awk '{print \"plexmediaserver:\", $1, \"| sonarr:\", $2, \"| jackett:\", $3, \"| qbittorrent:\", $4, \"| plex-watch:\", $5}'"
+    )
+    result = await _ssh_server(cmd)
+    disk = await _ssh_server("df -h / /mnt/ssd | tail -2")
+    ram = await _ssh_server("free -h | grep Mem")
+    return f"**Services:**\n{result}\n\n**Disk:**\n{disk}\n\n**RAM:**\n{ram}"
+
+
+@mcp.tool()
+async def server_download_anime(anime_name: str, sonarr_quality: str = "Any") -> str:
+    """
+    Search for and queue an anime download on the home server via Sonarr.
+    Provide the anime name and optionally a quality profile.
+    """
+    sonarr_key_cmd = "cat /var/lib/sonarr/config.xml | grep -o '<ApiKey>[^<]*</ApiKey>' | sed 's/<[^>]*>//g'"
+    api_key = (await _ssh_server(sonarr_key_cmd)).strip()
+    if not api_key:
+        return "Could not retrieve Sonarr API key from server."
+
+    # Built as a small self-contained python3 script (base64-transferred, same
+    # convention used for the organiser bridge) instead of a hand-built curl
+    # one-liner — the previous version interpolated anime_name directly into
+    # a single-quoted shell string, so a title containing an apostrophe (e.g.
+    # "Assassin's Pride") would break out of the quoting.
+    py_source = f"""
+import urllib.request as u, urllib.parse as p, json
+term = p.quote({anime_name!r})
+url = "http://localhost:8989/api/v3/series/lookup?term=" + term + "&apikey={api_key}"
+with u.urlopen(url, timeout=15) as r:
+    data = json.load(r)
+for i, s in enumerate(data[:5]):
+    print(f"{{i}}: {{s.get('title','?')}} ({{s.get('year','?')}}) - tvdbId={{s.get('tvdbId','?')}}")
+"""
+    src_b64 = base64.b64encode(py_source.encode("utf-8")).decode("ascii")
+    results = await _ssh_server(f"echo {src_b64} | base64 -d | python3 -")
+    return f"**Sonarr search results for '{anime_name}':**\n{results}\n\nTo add one, say 'add anime [number] from this list' and I'll queue it up!"
+
+
+@mcp.tool()
+async def server_download_status() -> str:
+    """Check current download status in qBittorrent and pipeline log."""
+    downloads = await _ssh_server("ls -lh /mnt/ssd/plex/downloads/ 2>/dev/null | head -20")
+    library = await _ssh_server("ls /media/plex/anime/library/ 2>/dev/null | head -20")
+    log = await _ssh_server("tail -20 /var/log/plex-download.log 2>/dev/null")
+    return (
+        f"**Active Downloads (/mnt/ssd/plex/downloads):**\n{downloads or 'Empty'}\n\n"
+        f"**Anime Library (/media/plex/anime/library):**\n{library or 'Empty'}\n\n"
+        f"**Pipeline Log (last 20 lines):**\n{log or 'No log yet'}"
+    )
+
+
+@mcp.tool()
+async def server_run_command(command: str) -> str:
+    """
+    Run a shell command on the home Linux server over SSH.
+    Good for anything read-only or administrative.
+
+    Note: the blocklist below is a footgun-prevention nicety, not a real
+    security boundary (trivially bypassable — this tool intentionally runs
+    arbitrary commands, that's its purpose). Avoid wiping disks.
+    """
+    blocked = ["rm -rf /", "mkfs", "dd if=", "> /dev/sda", "shutdown now", "halt"]
+    for b in blocked:
+        if b in command:
+            return f"Blocked: '{b}' is not allowed."
+    return await _ssh_server(command)
+
+
+@mcp.tool()
+async def server_pipeline_log() -> str:
+    """Get the full recent pipeline log showing download, scan, compress, and backup activity."""
+    return await _ssh_server("tail -50 /var/log/plex-download.log")
+
+
+@mcp.tool()
+async def server_list_files(path: str, recursive: bool = False) -> str:
+    """
+    List files and directories at a path on the Linux server.
+    recursive=True walks subdirectories (up to depth 3, can be slow).
+    """
+    if recursive:
+        cmd = f"find {_q(path)} -maxdepth 3 -not -path '*/.*' | sort | head -200"
+    else:
+        cmd = f"ls -lhA {_q(path)} 2>&1 | head -100"
+    return await _ssh_server(cmd)
+
+
+@mcp.tool()
+async def server_disk_usage(path: str = "/") -> str:
+    """
+    Show disk usage breakdown on the Linux server, sorted largest-first.
+    Defaults to root — pass a specific path like /mnt/ssd to drill in.
+    """
+    overview = await _ssh_server("df -h")
+    breakdown = await _ssh_server(f"du -h --max-depth=2 {_q(path)} 2>/dev/null | sort -rh | head -30")
+    return f"**Filesystem overview:**\n{overview}\n\n**Breakdown of {path}:**\n{breakdown}"
+
+
+@mcp.tool()
+async def server_read_file(path: str, tail: int = 0, head: int = 0) -> str:
+    """
+    Read a file on the Linux server.
+    tail=N  — show last N lines (great for logs).
+    head=N  — show first N lines.
+    Neither set — show up to 200 lines from the start.
+    """
+    if tail:
+        cmd = f"tail -n {_q(tail)} {_q(path)} 2>&1"
+    elif head:
+        cmd = f"head -n {_q(head)} {_q(path)} 2>&1"
+    else:
+        cmd = f"head -n 200 {_q(path)} 2>&1"
+    return await _ssh_server(cmd)
+
+
+@mcp.tool()
+async def server_write_file(path: str, content: str) -> str:
+    """
+    Write (overwrite) a file on the Linux server.
+    Content is base64-encoded for safe transfer.
+    Use with care — this replaces existing content.
+    """
+    encoded = base64.b64encode(content.encode()).decode()
+    cmd = f"echo {_q(encoded)} | base64 -d > {_q(path)} && echo 'OK'"
+    result = await _ssh_server(cmd)
+    return f"Written to '{path}': {result}"
+
+
+@mcp.tool()
+async def server_move_file(source: str, destination: str) -> str:
+    """Move or rename a file/directory on the Linux server."""
+    return await _ssh_server(f"mv {_q(source)} {_q(destination)} && echo 'Moved OK'")
+
+
+@mcp.tool()
+async def server_delete_file(path: str) -> str:
+    """
+    Delete a file (not a directory) on the Linux server.
+    For directories use server_run_command with rm -rf carefully.
+    """
+    return await _ssh_server(f"rm {_q(path)} && echo 'Deleted OK'")
+
+
+@mcp.tool()
+async def server_process_list() -> str:
+    """Show top CPU/RAM consuming processes on the Linux server."""
+    return await _ssh_server("ps aux --sort=-%cpu | head -20")
+
+
+@mcp.tool()
+async def server_service_control(service: str, action: str) -> str:
+    """
+    Start, stop, restart, or check status of a systemd service on the Linux server.
+    action — one of: start | stop | restart | status | enable | disable
+    """
+    allowed_actions = {"start", "stop", "restart", "status", "enable", "disable"}
+    if action not in allowed_actions:
+        return f"Invalid action '{action}'. Use one of: {', '.join(allowed_actions)}"
+    return await _ssh_server(f"sudo systemctl {action} {_q(service)} 2>&1")
+
+
+@mcp.tool()
+async def server_tail_log(log_path: str, lines: int = 50) -> str:
+    """
+    Tail any log file on the Linux server.
+    Common paths: /var/log/syslog, /var/log/nginx/error.log, /var/log/plex-download.log
+    """
+    return await _ssh_server(f"tail -n {_q(lines)} {_q(log_path)} 2>&1")
+
+
+@mcp.tool()
+async def server_cron_list() -> str:
+    """List all cron jobs on the Linux server (user + root)."""
+    user_cron = await _ssh_server("crontab -l 2>/dev/null || echo '(no user crontab)'")
+    root_cron = await _ssh_server("sudo crontab -l 2>/dev/null || echo '(no root crontab)'")
+    system_cron = await _ssh_server("ls /etc/cron.d/ 2>/dev/null && cat /etc/cron.d/* 2>/dev/null | head -60")
+    return f"**User crontab:**\n{user_cron}\n\n**Root crontab:**\n{root_cron}\n\n**System cron.d:**\n{system_cron}"
+
+
+@mcp.tool()
+async def server_network_info() -> str:
+    """Show network interfaces, open ports, and active connections on the Linux server."""
+    interfaces = await _ssh_server("ip -brief addr")
+    ports = await _ssh_server("ss -tlnp 2>/dev/null | head -30")
+    connections = await _ssh_server("ss -tnp state established 2>/dev/null | head -20")
+    return f"**Interfaces:**\n{interfaces}\n\n**Listening ports:**\n{ports}\n\n**Active connections:**\n{connections}"
+
+
+@mcp.tool()
+async def server_docker_status() -> str:
+    """List Docker containers and their status on the Linux server (if Docker is installed)."""
+    containers = await _ssh_server("docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>&1")
+    images = await _ssh_server("docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}' 2>&1 | head -20")
+    return f"**Containers:**\n{containers}\n\n**Images:**\n{images}"
+
+
+@mcp.tool()
+async def server_find_duplicates(path: str) -> str:
+    """
+    Find duplicate files on the Linux server by content hash (MD5).
+    Scans the given path recursively. Can be slow on large directories.
+    """
+    cmd = (
+        f"find {_q(path)} -type f -exec md5sum {{}} \\; 2>/dev/null "
+        "| sort | awk 'seen[$1]++{print $2, \"DUPLICATE OF\", prev[$1]} {prev[$1]=$2}' | head -40"
+    )
+    result = await _ssh_server(cmd)
+    return result or "No duplicates found."
+
+
+# ---------------------------------------------------------------------------
+# PC File Organiser Tools
+# ---------------------------------------------------------------------------
+#
+# These tools let Claude browse, move, delete, and analyse files on the
+# user's Windows PC(s), each running the companion organiser-agent
+# (C++ build).
+#
+# Routing — everything goes through the Linux home server, nothing talks
+# to a PC directly:
+#
+#   Render (this process)
+#       │  tailscale ssh  (same channel _ssh_server() uses for every
+#       │                  other server_* tool — one exec call)
+#       ▼
+#   stoni-room-serve (Linux)
+#       │  curl http://127.0.0.1:<pc's port>/...  (loopback only —
+#       │  pc-tunnel@<name>.service forwards this to that PC via its
+#       │  own outbound SSH connection)
+#       ▼
+#   organiser-agent.exe on the target PC
+#
+# Render never opens a raw TCP connection to any PC, and never even
+# opens one to the server's public/Tailscale IP for this traffic — it's
+# folded into the same authenticated `tailscale ssh` exec used
+# everywhere else. Every server-side tunnel is loopback-only.
+#
+# Multi-PC: configure the PCS env var (see "PC Registry" above). Every
+# tool below takes `pc: str = "default"` to pick which machine it talks to.
+# ---------------------------------------------------------------------------
+
+async def _organiser_ssh_request(
+    method: str, path: str, pc: str = "default",
+    params: dict | None = None, body: dict | None = None, timeout: int = 30,
+) -> str:
+    """
+    Executes one HTTP request against a PC's organiser-agent by having the
+    Linux server curl its own loopback tunnel for that PC, via the
+    existing tailscale-ssh exec channel. Returns raw response text
+    (expected to be JSON).
+
+    The whole request is shipped as a base64-encoded Python source blob
+    (`echo <b64> | base64 -d | python3 -`) — the same base64-transfer
+    convention used elsewhere in this file — so arbitrary path/content
+    characters (spaces, backslashes, quotes in Windows paths) never touch
+    a shell quoting layer at all.
+    """
+    entry = _resolve_pc(pc)
+    base = f"http://127.0.0.1:{entry['port']}"
+    envelope = {
+        "method": method,
+        "path": path,
+        "params": params or {},
+        "body": body,
+        "secret": entry.get("secret", ""),
+        "base": base,
+    }
+    env_b64 = base64.b64encode(json.dumps(envelope).encode("utf-8")).decode("ascii")
+
+    py_source = f"""
+import urllib.request as u, urllib.parse as p, json, base64
+e = json.loads(base64.b64decode("{env_b64}").decode())
+url = e["base"] + e["path"]
+if e["params"]:
+    url += "?" + p.urlencode(e["params"])
+headers = {{"Content-Type": "application/json"}}
+if e["secret"]:
+    headers["X-Organiser-Secret"] = e["secret"]
+data = json.dumps(e["body"]).encode() if e["body"] is not None else None
+req = u.Request(url, data=data, headers=headers, method=e["method"])
+try:
+    with u.urlopen(req, timeout=25) as r:
+        print(r.read().decode())
+except u.HTTPError as ex:
+    print(json.dumps({{"error": ex.read().decode(), "status_code": ex.code}}))
+except Exception as ex:
+    print(json.dumps({{"error": str(ex)}}))
+"""
+    src_b64 = base64.b64encode(py_source.encode("utf-8")).decode("ascii")
+    cmd = f"echo {src_b64} | base64 -d | python3 -"
+    return await _ssh_server(cmd, timeout=timeout)
+
+
+def _parse_organiser_response(raw: str) -> dict:
+    raw = (raw or "").strip()
+    if not raw:
+        raise RuntimeError(
+            "Empty response reaching the organiser-agent via the server. "
+            "Check: is pc-tunnel@<name>.service running on the Linux server, "
+            "and is organiser-agent.exe running on that PC?"
+        )
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Non-JSON response from organiser-agent (via server): {raw[:300]}")
+
+
+async def _org_get(path: str, params: dict | None = None, pc: str = "default") -> dict:
+    raw = await _organiser_ssh_request("GET", path, pc=pc, params=params)
+    return _parse_organiser_response(raw)
+
+
+async def _org_post(path: str, body: dict, pc: str = "default") -> dict:
+    raw = await _organiser_ssh_request("POST", path, pc=pc, body=body)
+    return _parse_organiser_response(raw)
+
+
+@mcp.tool()
+async def pc_list_configured() -> str:
+    """List every PC configured in the PCS registry (name + tunnel port; secrets are never shown)."""
+    if not _PC_REGISTRY:
+        return "No PCs configured."
+    lines = [f"- {name} (port {entry.get('port')})" for name, entry in sorted(_PC_REGISTRY.items())]
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def pc_organiser_status(pc: str = "default") -> str:
+    """
+    Check whether organiser-agent.exe is reachable on the given PC, routed
+    through the Linux server (tailscale ssh → loopback tunnel → PC).
+    Returns its version and platform. Use pc_list_configured to see valid
+    `pc` names.
+    """
+    try:
+        data = await _org_get("/status", pc=pc)
+        return (
+            f"✅ '{pc}' reachable via {SERVER_HOST} → loopback:{_resolve_pc(pc)['port']}\n"
+            f"Version : {data.get('version', '?')}\n"
+            f"Platform: {data.get('platform', '?')}"
+        )
+    except Exception as e:
+        return (
+            f"❌ Could not reach organiser agent '{pc}': {e}\n\n"
+            "Checklist:\n"
+            "  1. Is organiser-agent.exe running on that PC (Task Scheduler)?\n"
+            f"  2. Is pc-tunnel@{pc}.service active on the Linux server?\n"
+            f"     (sudo systemctl status pc-tunnel@{pc})\n"
+            "  3. Is the Linux server itself reachable over Tailscale right now?"
+        )
+
+
+@mcp.tool()
+async def pc_list_files(folder: str, recursive: bool = False, pc: str = "default") -> str:
+    """
+    List files and folders inside a directory on a PC.
+    Returns name, size, extension, and last-modified for each entry.
+    """
+    data = await _org_get("/list", {"folder": folder, "recursive": str(recursive).lower()}, pc=pc)
+    entries = data.get("entries", [])
+    if not entries:
+        return f"No files found in '{folder}' (or path doesn't exist)."
+    lines = []
+    for e in entries:
+        kind = "DIR " if e.get("is_dir") else "FILE"
+        size = e.get("size_bytes", 0)
+        lines.append(f"[{kind}] {e.get('path')} ({size:,} bytes) modified {e.get('modified','?')}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def pc_move_file(source: str, destination: str, pc: str = "default") -> str:
+    """Move (or rename) a file or folder on a PC. Parent directories are created automatically."""
+    data = await _org_post("/move", {"source": source, "destination": destination}, pc=pc)
+    return data.get("message", f"Moved '{source}' → '{destination}'")
+
+
+@mcp.tool()
+async def pc_delete_file(path: str, permanent: bool = False, pc: str = "default") -> str:
+    """
+    Delete a file or empty folder on a PC. By default sends to the Recycle
+    Bin / Trash (safe). Set permanent=True only when explicitly asked to
+    permanently delete.
+    """
+    data = await _org_post("/delete", {"path": path, "permanent": permanent}, pc=pc)
+    return data.get("message", f"Deleted '{path}'")
+
+
+@mcp.tool()
+async def pc_read_file_preview(path: str, max_bytes: int = 4096, pc: str = "default") -> str:
+    """Read the first max_bytes bytes of a text file on a PC. Useful for peeking before deciding what to do with it."""
+    data = await _org_get("/preview", {"path": path, "max_bytes": max_bytes}, pc=pc)
+    return data.get("content", "(empty or binary file)")
+
+
+@mcp.tool()
+async def pc_disk_usage(folder: str, pc: str = "default") -> str:
+    """Return a breakdown of disk usage inside a folder on a PC, sorted largest-first."""
+    data = await _org_get("/disk_usage", {"folder": folder}, pc=pc)
+    items = data.get("items", [])
+    lines = [f"{i.get('size_human','?'):>10}  {i.get('path')}" for i in items]
+    total = data.get("total_human", "?")
+    return f"**{folder}** — total: {total}\n" + "\n".join(lines) if lines else f"'{folder}' appears empty."
+
+
+@mcp.tool()
+async def pc_run_command(command: str, working_dir: str = "", pc: str = "default") -> str:
+    """
+    Run a shell command on a PC. Works on Windows (cmd/PowerShell) and
+    Mac/Linux (bash). Avoid destructive commands; prefer pc_delete_file
+    for deletions.
+    """
+    body: dict = {"command": command}
+    if working_dir:
+        body["working_dir"] = working_dir
+    data = await _org_post("/run_command", body, pc=pc)
+    output = data.get("stdout", "") + data.get("stderr", "")
+    rc = data.get("returncode", 0)
+    return f"[exit {rc}]\n{output}" if output else f"[exit {rc}] (no output)"
+
+
+@mcp.tool()
+async def pc_find_duplicates(folder: str, pc: str = "default") -> str:
+    """Scan a folder on a PC for duplicate files (by content hash). Returns groups of identical files."""
+    data = await _org_get("/duplicates", {"folder": folder}, pc=pc)
+    groups = data.get("groups", [])
+    if not groups:
+        return "No duplicates found."
+    lines = []
+    for g in groups:
+        lines.append(f"{g.get('count')}× {g.get('size_human')} each, wasting {g.get('wasted_human')}:")
+        for f in g.get("files", []):
+            lines.append(f"  - {f}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+async def pc__screenshot(save_path: str = "", pc: str = "default") -> str:
+    """
+    Capture a screenshot of a PC's screen. Returns base64-encoded image data
+    so you can view/analyse it. save_path — optional path on that PC to
+    also save the file.
+    """
+    body: dict = {}
+    if save_path:
+        body["save_path"] = save_path
+    data = await _org_post("/screenshot", body, pc=pc)
+    b64 = data.get("image_base64", "")
+    path = data.get("saved_path", "")
+    size = data.get("size", "")
+    if not b64:
+        return data.get("error", "Screenshot failed — no image returned.")
+    return (
+        f"Screenshot captured ({size}).\n"
+        f"{'Saved to: ' + path if path else ''}\n"
+        f"base64_length={len(b64)}\n"
+        f"data:image/png;base64,{b64[:200]}..."
+    )
+
+
+# ---------------------------------------------------------------------------
+# File Transfer Tools (PC ↔ Sandbox ↔ Codespace ↔ Server)
+# ---------------------------------------------------------------------------
+
+@mcp.tool()
+async def transfer__pc_to_sandbox(remote_path: str, local_save_path: str, pc: str = "default") -> str:
+    """Download a (text) file from a PC into this sandbox, via organiser-agent."""
+    data = await _org_get("/preview", {"path": remote_path, "max_bytes": 10_000_000}, pc=pc)
+    content = data.get("content", "")
+    if not content:
+        return f"Could not read '{remote_path}' — empty or binary file."
+    import pathlib
+    pathlib.Path(local_save_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(local_save_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"Saved '{remote_path}' → '{local_save_path}' ({len(content)} bytes)"
+
+
+@mcp.tool()
+async def transfer__sandbox_to_pc(local_path: str, remote_dest_path: str, pc: str = "default") -> str:
+    """Upload a file from this sandbox to a PC, via organiser-agent."""
+    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    data = await _org_post("/write_file", {"path": remote_dest_path, "content": content}, pc=pc)
+    return data.get("message", f"Uploaded '{local_path}' → '{remote_dest_path}'")
+
+
+@mcp.tool()
+async def transfer__sandbox_to_codespace(
+    local_path: str, codespace_name: str, remote_path: str, account: str = "auto"
+) -> str:
+    """Copy a file from this sandbox into a GitHub Codespace."""
+    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    encoded = base64.b64encode(content.encode()).decode()
+    gh = _gh_headers(_get_token(account)[0])
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"https://api.github.com/user/codespaces/{codespace_name}/content",
+            headers=gh,
+            json={"path": remote_path, "content": encoded},
+            timeout=30,
+        )
+    if r.status_code in (200, 201, 204):
+        return f"Transferred '{local_path}' → {codespace_name}:{remote_path}"
+    # Fallback: base64-safe write via exec, instead of a raw heredoc (which
+    # broke on content containing the literal delimiter text).
+    cmd = f"mkdir -p $(dirname {_q(remote_path)}) && echo {_q(encoded)} | base64 -d > {_q(remote_path)}"
+    result = await exec_command(codespace_name, cmd, account=account)
+    return f"Transferred via exec: {result}"
+
+
+@mcp.tool()
+async def transfer__server_to_sandbox(remote_path: str, local_save_path: str) -> str:
+    """Download a file from the Linux server into this sandbox via SSH."""
+    content = await _ssh_server(f"cat {_q(remote_path)} 2>&1")
+    import pathlib
+    pathlib.Path(local_save_path).parent.mkdir(parents=True, exist_ok=True)
+    with open(local_save_path, "w", encoding="utf-8") as f:
+        f.write(content)
+    return f"Saved server:'{remote_path}' → '{local_save_path}' ({len(content)} bytes)"
+
+
+@mcp.tool()
+async def transfer__sandbox_to_server(local_path: str, remote_dest_path: str) -> str:
+    """Upload a file from this sandbox to the Linux server via SSH."""
+    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    encoded = base64.b64encode(content.encode()).decode()
+    result = await _ssh_server(
+        f"mkdir -p $(dirname {_q(remote_dest_path)}) && "
+        f"echo {_q(encoded)} | base64 -d > {_q(remote_dest_path)} && echo OK"
+    )
+    return f"Uploaded → server:'{remote_dest_path}': {result}"
+
+
+# ---------------------------------------------------------------------------
+# Diagnostics — test every configured subsystem
+# ---------------------------------------------------------------------------
+
+async def _run_diagnostics() -> dict:
+    """
+    Runs a lightweight health check for every subsystem this server can
+    talk to, and returns a structured report. Backs both the
+    run_diagnostics MCP tool and the admin dashboard's "Run All Tests".
+    """
+    checks = []
+
+    async def _check(name: str, coro):
+        try:
+            detail = await coro
+            checks.append({"name": name, "status": "pass", "detail": detail})
+        except Exception as e:
+            checks.append({"name": name, "status": "fail", "detail": str(e)})
+
+    # GitHub tokens
+    for label, env_name in [
+        ("GitHub primary", "GITHUB_TOKEN"),
+        ("GitHub secondary", "GITHUB_TOKEN_SECONDARY"),
+        ("GitHub tertiary", "GITHUB_TOKEN_TERTIARY"),
+    ]:
+        token = os.environ.get(env_name, "").strip()
+        if not token:
+            checks.append({"name": label, "status": "skip", "detail": "not configured"})
+            continue
+
+        async def _do(tok=token):
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"{GITHUB_API}/user", headers=_gh_headers(tok), timeout=10)
+            if r.status_code != 200:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            return f"authenticated as {r.json().get('login', '?')}"
+
+        await _check(label, _do())
+
+    # Codespaces API
+    async def _codespaces():
+        data = await _gh_request_with_fallback("GET", "/user/codespaces")
+        return f"{len(data.get('codespaces', []))} codespace(s) visible"
+
+    await _check("Codespaces API", _codespaces())
+
+    # Plex
+    if PLEX_TOKEN:
+        async def _plex():
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{PLEX_URL}/", params={"X-Plex-Token": PLEX_TOKEN}, headers={"Accept": "application/json"}, timeout=10
+                )
+            r.raise_for_status()
+            return f"reachable ({r.json().get('MediaContainer', {}).get('friendlyName', '?')})"
+
+        await _check("Plex", _plex())
+    else:
+        checks.append({"name": "Plex", "status": "skip", "detail": "PLEX_TOKEN not configured"})
+
+    # Linux server
+    async def _server():
+        out = await _ssh_server("echo alive", timeout=15)
+        if "alive" not in out:
+            raise RuntimeError(out[:200] or "no response")
+        return f"{SERVER_USER}@{SERVER_HOST} reachable"
+
+    await _check("Linux server", _server())
+
+    # Each configured PC
+    for pc_name in sorted(_PC_REGISTRY.keys()):
+        async def _pc(name=pc_name):
+            data = await _org_get("/status", pc=name)
+            return f"{data.get('platform', '?')} v{data.get('version', '?')}"
+
+        await _check(f"PC '{pc_name}'", _pc())
+
+    # Render API (needed for the admin settings panel)
+    if RENDER_API_KEY and RENDER_SERVICE_ID:
+        async def _render():
+            async with httpx.AsyncClient() as client:
+                r = await client.get(
+                    f"{RENDER_API}/services/{RENDER_SERVICE_ID}", headers=_render_headers(), timeout=10
+                )
+            r.raise_for_status()
+            return r.json().get("name", "?")
+
+        await _check("Render API", _render())
+    else:
+        checks.append({"name": "Render API", "status": "skip", "detail": "RENDER_API_KEY/RENDER_SERVICE_ID not configured"})
+
+    passed = sum(1 for c in checks if c["status"] == "pass")
+    failed = sum(1 for c in checks if c["status"] == "fail")
+    skipped = sum(1 for c in checks if c["status"] == "skip")
+    return {"checks": checks, "summary": f"{passed} passed, {failed} failed, {skipped} skipped"}
+
+
+@mcp.tool()
+async def run_diagnostics() -> str:
+    """
+    Test every configured subsystem (GitHub tokens, Codespaces API, Plex,
+    Linux server, each configured PC's organiser-agent, Render API) and
+    report pass/fail/skip for each. Use this to verify the whole stack
+    after making config changes.
+    """
+    report = await _run_diagnostics()
+    icon = {"pass": "✅", "fail": "❌", "skip": "⏭️"}
+    lines = [f"**Diagnostics — {report['summary']}**\n"]
+    for c in report["checks"]:
+        lines.append(f"{icon.get(c['status'], '?')} {c['name']}: {c['detail']}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Admin Dashboard — configure everything from a browser
+# ---------------------------------------------------------------------------
+#
+# Separate cookie-based login (NOT the MCP bearer-token auth above, since
+# a plain browser navigation can't set an Authorization header). Gated by
+# ADMIN_PASSWORD (falls back to MCP_SERVER_PASSWORD if unset). The cookie
+# is a stateless HMAC-signed "<expiry>.<signature>" pair — no session
+# store needed for a single-admin personal dashboard.
+
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip() or os.environ.get("MCP_SERVER_PASSWORD", "").strip()
+_ADMIN_COOKIE_SECRET = (
+    os.environ.get("ADMIN_COOKIE_SECRET", "").strip() or ADMIN_PASSWORD or "insecure-dev-secret-set-ADMIN_PASSWORD"
+)
+_ADMIN_SESSION_TTL = 60 * 60 * 12  # 12 hours
+_ADMIN_COOKIE_NAME = "admin_session"
+
+
+def _render_headers() -> dict:
+    return {"Authorization": f"Bearer {RENDER_API_KEY}", "Accept": "application/json", "Content-Type": "application/json"}
+
+
+def _admin_sign(payload: str) -> str:
+    return hmac.new(_ADMIN_COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def _admin_make_cookie() -> str:
+    expiry = str(int(time.time()) + _ADMIN_SESSION_TTL)
+    return f"{expiry}.{_admin_sign(expiry)}"
+
+
+def _admin_cookie_valid(cookie_value: str | None) -> bool:
+    if not cookie_value or "." not in cookie_value:
+        return False
+    expiry_s, sig = cookie_value.split(".", 1)
+    try:
+        if time.time() > int(expiry_s):
+            return False
+    except ValueError:
+        return False
+    return hmac.compare_digest(sig, _admin_sign(expiry_s))
+
+
+def _admin_authed(request: Request) -> bool:
+    return _admin_cookie_valid(request.cookies.get(_ADMIN_COOKIE_NAME))
+
+
+_ADMIN_PAGE_TEMPLATE = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>codespaces-mcp admin</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #0d1117; color: #e6edf3;
+         max-width: 900px; margin: 0 auto; padding: 24px 16px; line-height: 1.5; }
+  h1 { font-size: 1.3rem; }
+  h2 { font-size: 1.05rem; border-bottom: 1px solid #30363d; padding-bottom: 6px; margin-top: 2rem; }
+  .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+  input, textarea, button, select { font-family: inherit; font-size: 0.9rem; }
+  input[type=text], input[type=password] { background: #0d1117; border: 1px solid #30363d; color: #e6edf3;
+         border-radius: 6px; padding: 8px 10px; width: 100%; box-sizing: border-box; }
+  button { background: #238636; border: none; color: white; border-radius: 6px; padding: 8px 14px;
+         cursor: pointer; margin-top: 8px; }
+  button:hover { background: #2ea043; }
+  button.secondary { background: #30363d; }
+  button.secondary:hover { background: #3f4652; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  td, th { text-align: left; padding: 6px 8px; border-bottom: 1px solid #21262d; }
+  .pass { color: #3fb950; } .fail { color: #f85149; } .skip { color: #8b949e; }
+  pre { background: #0d1117; border: 1px solid #30363d; border-radius: 6px; padding: 10px;
+        overflow-x: auto; white-space: pre-wrap; word-break: break-word; font-size: 0.82rem; }
+  .row { display: flex; gap: 8px; }
+  .row > * { flex: 1; }
+  .muted { color: #8b949e; font-size: 0.85rem; }
+</style>
+</head>
+<body>
+__BODY__
+</body>
+</html>
+"""
+
+_ADMIN_LOGIN_BODY = """
+<h1>codespaces-mcp admin</h1>
+<div class="card">
+  <form method="POST" action="/admin/login">
+    <label class="muted">Admin password</label>
+    <input type="password" name="password" autofocus>
+    <button type="submit">Log in</button>
+  </form>
+  __ERROR__
+</div>
+"""
+
+_ADMIN_DASHBOARD_BODY = """
+<h1>codespaces-mcp admin</h1>
+<p class="muted">Signed in. <a href="/admin/logout" style="color:#58a6ff;">Log out</a></p>
+
+<h2>Render settings</h2>
+<div class="card">
+  <p class="muted">Service: <code>__SERVICE_ID__</code></p>
+  <div id="env-table">Loading…</div>
+  <div class="row" style="margin-top:12px;">
+    <input type="text" id="env-key" placeholder="KEY (e.g. MCP_SERVER_PASSWORD)">
+    <input type="text" id="env-value" placeholder="value">
+  </div>
+  <button onclick="setEnvVar()">Save variable</button>
+  <button class="secondary" onclick="triggerDeploy()">Trigger redeploy</button>
+  <pre id="env-result"></pre>
+</div>
+
+<h2>Linux server</h2>
+<div class="card">
+  <input type="text" id="server-cmd" placeholder="command to run on stoni-room-serve">
+  <button onclick="runServerCmd()">Run</button>
+  <pre id="server-result"></pre>
+</div>
+
+<h2>Diagnostics</h2>
+<div class="card">
+  <button onclick="runDiagnostics()">Run all tests</button>
+  <div id="diag-result"></div>
+</div>
+
+<script>
+function esc(s) {
+  const d = document.createElement("div");
+  d.innerText = String(s ?? "");
+  return d.innerHTML;
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (r.status === 401) { window.location = "/admin"; return null; }
+  return r.json();
+}
+
+async function loadEnv() {
+  const data = await api("/admin/api/env");
+  if (!data) return;
+  if (data.error) { document.getElementById("env-table").innerText = data.error; return; }
+  let rows = data.vars.map(v =>
+    `<tr><td>${esc(v.key)}</td><td>${esc(v.value)}</td></tr>`
+  ).join("");
+  document.getElementById("env-table").innerHTML =
+    `<table><tr><th>Key</th><th>Value</th></tr>${rows}</table>`;
+}
+
+async function setEnvVar() {
+  const key = document.getElementById("env-key").value.trim();
+  const value = document.getElementById("env-value").value;
+  if (!key) return;
+  const data = await api("/admin/api/env", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({key, value})
+  });
+  document.getElementById("env-result").innerText = JSON.stringify(data, null, 2);
+  loadEnv();
+}
+
+async function triggerDeploy() {
+  const data = await api("/admin/api/deploy", {method: "POST"});
+  document.getElementById("env-result").innerText = JSON.stringify(data, null, 2);
+}
+
+async function runServerCmd() {
+  const command = document.getElementById("server-cmd").value;
+  const data = await api("/admin/api/server/run", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({command})
+  });
+  document.getElementById("server-result").innerText = data.output ?? JSON.stringify(data, null, 2);
+}
+
+async function runDiagnostics() {
+  document.getElementById("diag-result").innerText = "Running…";
+  const data = await api("/admin/api/diagnostics");
+  if (!data) return;
+  let rows = data.checks.map(c =>
+    `<tr><td class="${esc(c.status)}">${esc(c.status)}</td><td>${esc(c.name)}</td><td>${esc(c.detail)}</td></tr>`
+  ).join("");
+  document.getElementById("diag-result").innerHTML =
+    `<p class="muted">${esc(data.summary)}</p><table><tr><th>Status</th><th>Check</th><th>Detail</th></tr>${rows}</table>`;
+}
+
+loadEnv();
+</script>
+"""
+
+
+async def _admin_page(request: Request) -> HTMLResponse:
+    if not _admin_authed(request):
+        body = _ADMIN_LOGIN_BODY.replace("__ERROR__", "")
+        return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body))
+    body = _ADMIN_DASHBOARD_BODY.replace("__SERVICE_ID__", _html.escape(RENDER_SERVICE_ID))
+    return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body))
+
+
+async def _admin_login(request: Request) -> RedirectResponse | HTMLResponse:
+    form = await request.form()
+    password = str(form.get("password", ""))
+    if not ADMIN_PASSWORD:
+        body = _ADMIN_LOGIN_BODY.replace(
+            "__ERROR__", "<p style='color:#f85149'>ADMIN_PASSWORD is not set — admin login is disabled.</p>"
+        )
+        return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=503)
+    if not hmac.compare_digest(password, ADMIN_PASSWORD):
+        body = _ADMIN_LOGIN_BODY.replace("__ERROR__", "<p style='color:#f85149'>Wrong password.</p>")
+        return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=401)
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.set_cookie(
+        _ADMIN_COOKIE_NAME, _admin_make_cookie(), max_age=_ADMIN_SESSION_TTL, httponly=True, samesite="lax"
+    )
+    return resp
+
+
+async def _admin_logout(request: Request) -> RedirectResponse:
+    resp = RedirectResponse(url="/admin", status_code=303)
+    resp.delete_cookie(_ADMIN_COOKIE_NAME)
+    return resp
+
+
+def _require_admin(request: Request) -> JSONResponse | None:
+    if not _admin_authed(request):
+        return JSONResponse({"error": "Not authenticated."}, status_code=401)
+    return None
+
+
+async def _admin_api_env_get(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    if not (RENDER_API_KEY and RENDER_SERVICE_ID):
+        return JSONResponse({"error": "RENDER_API_KEY / RENDER_SERVICE_ID not configured on this deployment."})
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars", headers=_render_headers(), timeout=15)
+        r.raise_for_status()
+        items = r.json()
+        env_vars = [{"key": i["envVar"]["key"], "value": i["envVar"]["value"]} for i in items]
+        env_vars.sort(key=lambda v: v["key"])
+        return JSONResponse({"vars": env_vars})
+    except httpx.HTTPError as e:
+        return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+
+async def _admin_api_env_set(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    if not (RENDER_API_KEY and RENDER_SERVICE_ID):
+        return JSONResponse({"error": "RENDER_API_KEY / RENDER_SERVICE_ID not configured on this deployment."}, status_code=400)
+    body = await request.json()
+    key = str(body.get("key", "")).strip()
+    value = body.get("value", "")
+    if not key:
+        return JSONResponse({"error": "Missing 'key'."}, status_code=400)
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.put(
+                f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars/{key}",
+                headers=_render_headers(),
+                json={"value": value},
+                timeout=15,
+            )
+        r.raise_for_status()
+        return JSONResponse({"ok": True, "note": "Saved. Click 'Trigger redeploy' for it to take effect."})
+    except httpx.HTTPError as e:
+        return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+
+async def _admin_api_deploy(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    if not (RENDER_API_KEY and RENDER_SERVICE_ID):
+        return JSONResponse({"error": "RENDER_API_KEY / RENDER_SERVICE_ID not configured on this deployment."}, status_code=400)
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.post(
+                f"{RENDER_API}/services/{RENDER_SERVICE_ID}/deploys",
+                headers=_render_headers(),
+                json={"clearCache": "do_not_clear"},
+                timeout=15,
+            )
+        r.raise_for_status()
+        return JSONResponse({"ok": True, "deploy": r.json()})
+    except httpx.HTTPError as e:
+        return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+
+async def _admin_api_server_run(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    body = await request.json()
+    command = str(body.get("command", "")).strip()
+    if not command:
+        return JSONResponse({"error": "Missing 'command'."}, status_code=400)
+    output = await _ssh_server(command, timeout=30)
+    return JSONResponse({"output": output})
+
+
+async def _admin_api_diagnostics(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    report = await _run_diagnostics()
+    return JSONResponse(report)
+
+
+# ---------------------------------------------------------------------------
+# Server Entrypoint & Routes
+# ---------------------------------------------------------------------------
+
+app = mcp.streamable_http_app()
+app.add_middleware(PasswordAuthMiddleware)
+
+
+async def _root(request: Request) -> JSONResponse:
+    return JSONResponse(
+        {
+            "status": "ok",
+            "service": "github-codespaces MCP server",
+            "message": "MCP endpoint is at /mcp — admin dashboard at /admin",
+            "mcp_endpoint": "/mcp",
+            "admin_endpoint": "/admin",
+            "allowed_host_configured": bool(_allowed_host),
+            "auth_enabled": bool(os.environ.get("MCP_SERVER_PASSWORD")),
+            "admin_enabled": bool(ADMIN_PASSWORD),
+            "render_admin_configured": bool(RENDER_API_KEY),
+            "plex_configured": bool(PLEX_TOKEN),
+            "server_configured": bool(SERVER_HOST),
+            "pcs_configured": sorted(_PC_REGISTRY.keys()),
+            "accounts": {
+                "primary": bool(os.environ.get("GITHUB_TOKEN")),
+                "secondary": bool(os.environ.get("GITHUB_TOKEN_SECONDARY")),
+                "tertiary": bool(os.environ.get("GITHUB_TOKEN_TERTIARY")),
+            },
+        }
+    )
+
+
+async def _health(request: Request) -> JSONResponse:
+    return JSONResponse({"status": "ok"})
+
+
+app.router.routes.insert(0, Route("/", _root, methods=["GET", "POST", "HEAD"]))
+app.router.routes.insert(1, Route("/healthz", _health, methods=["GET", "HEAD"]))
+app.router.routes.insert(2, Route("/admin", _admin_page, methods=["GET"]))
+app.router.routes.insert(3, Route("/admin/login", _admin_login, methods=["POST"]))
+app.router.routes.insert(4, Route("/admin/logout", _admin_logout, methods=["GET"]))
+app.router.routes.insert(5, Route("/admin/api/env", _admin_api_env_get, methods=["GET"]))
+app.router.routes.insert(6, Route("/admin/api/env", _admin_api_env_set, methods=["POST"]))
+app.router.routes.insert(7, Route("/admin/api/deploy", _admin_api_deploy, methods=["POST"]))
+app.router.routes.insert(8, Route("/admin/api/server/run", _admin_api_server_run, methods=["POST"]))
+app.router.routes.insert(9, Route("/admin/api/diagnostics", _admin_api_diagnostics, methods=["GET"]))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", "8000"))
+    uvicorn.run(app, host="0.0.0.0", port=port)

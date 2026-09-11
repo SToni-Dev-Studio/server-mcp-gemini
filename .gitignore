@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+.secrets
+.secrets.txt
+.secrets.*
+!.secrets.example
+*.log
+.DS_Store
+venv/
+.venv/
+node_modules/

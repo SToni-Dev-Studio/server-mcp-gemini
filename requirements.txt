@@ -1,0 +1,7 @@
+mcp==1.29.0
+httpx>=0.28
+uvicorn>=0.30
+python-dotenv>=1.0
+Pillow>=10.0
+asyncssh>=2.14
+python-socks[asyncio]>=2.4
