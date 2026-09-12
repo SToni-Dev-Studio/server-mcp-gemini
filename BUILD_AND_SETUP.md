@@ -260,7 +260,7 @@ Visit `https://<your-render-app>.onrender.com/admin`.
   for changes to take effect (Render doesn't auto-deploy env var changes).
 - **Linux server**: run one-off commands directly from the page.
 - **Diagnostics**: click **Run all tests** to check every GitHub token,
-  the Codespaces API, Plex, the Linux server, and every configured PC's
+  the Codespaces API, the Linux server, and every configured PC's
   organiser-agent in one pass — pass/fail/skip with a reason for each.
 
 The same diagnostics are available from chat too, as the `run_diagnostics`

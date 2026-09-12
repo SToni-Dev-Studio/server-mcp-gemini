@@ -1,11 +1,11 @@
 # codespaces-mcp
 
-A remote MCP server that gives Claude ~50 narrow, purpose-built tools —
+A remote MCP server that gives Claude ~45 narrow, purpose-built tools —
 instead of one broad "do anything" tool — for managing personal
-infrastructure: GitHub Codespaces, a Linux home server, one or more
-Windows PCs, and a Plex media server, all through a single HTTPS
-endpoint. Includes a password-gated browser admin dashboard for
-configuring the deployment itself.
+infrastructure: GitHub Codespaces, a Linux home server, and one or more
+Windows PCs, all through a single HTTPS endpoint. Includes a
+password-gated browser admin dashboard for configuring the deployment
+itself.
 
 Read next:
 - **`ARCHITECTURE.md`** — how the pieces fit together, auth model, known
@@ -22,8 +22,7 @@ Read next:
 | GitHub Codespaces | `list_codespaces`, `exec_command`, `create_git_commit_and_push` |
 | Linux home server | `server_status`, `server_run_command`, `server_tail_log` |
 | Windows PC(s) | `pc_list_files`, `pc_move_file`, `pc__screenshot` |
-| Plex | `plex_search`, `plex_scan_library` |
-| File transfer | `transfer__pc_to_sandbox`, `transfer__sandbox_to_server` |
+| File transfer | `file_transfer` — any endpoint to any other (sandbox/server/pc/codespace) |
 | Diagnostics / admin | `run_diagnostics`, browser dashboard at `/admin` |
 
 See `SKILL.md` for the complete list with parameters.
@@ -92,15 +91,16 @@ deployment.
 
 ## Known limitations
 
-The full, honest list — including the two organiser-agent
-implementations, the Fly-vs-Render status, and what isn't protected
-against — lives in **`ARCHITECTURE.md`**. Highlights:
+The full, honest list lives in **`ARCHITECTURE.md`**. Highlights:
 
 - `organiser-agent.py` (the Python build) has no path-traversal/
   protected-path checks. Use `organiser-agent.cpp` for anything real.
 - `*_run_command` tools (PC and Linux server both) are intentionally
   close to unrestricted shell access — treat their permission level
   accordingly.
+- `file_transfer` can't yet move a binary file to/from a PC (fails
+  cleanly rather than corrupting — organiser-agent's file API is
+  text-only today).
 - No CI test/lint pipeline for `server.py` yet.
 
 ## Local testing
@@ -111,8 +111,10 @@ cp .secrets.example .secrets
 python server.py
 ```
 
-The single existing regression test can be run directly:
+Run the existing tests:
 
 ```bash
-python tests/test_admin_cookie_auth.py
+python tests/test_admin_cookie_auth.py   # plain script, run directly
+pip install pytest && pytest tests/      # runs everything, including
+                                          # the fixture-based file_transfer tests
 ```
