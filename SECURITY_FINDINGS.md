@@ -32,6 +32,9 @@ writing (`python3 -m pytest tests/ -v`).
 | 12 | Shell-injection sweep of server.py's command-building code | server.py | — | **No injection found** — positive finding |
 | 13 | PC binary transfer failure mode | server.py + organiser-agent.cpp | — | **Claim verified true** — fails cleanly, does not corrupt |
 | 14 | Query-string parser does not URL-decode | organiser-agent.cpp | Info | Behavioral quirk, not a vulnerability |
+| 15 | DNS-rebinding `allowed_hosts` has no port wildcard — breaks local/self-hosted access | server.py | Low (availability, fails closed) | Confirmed |
+| 16 | Session ID alone (no bearer token) is rejected — auth runs per-request | server.py | — | **Confirmed secure** — positive finding |
+| 17 | MCP wire-protocol fuzzing (malformed JSON-RPC, wrong tool-arg types, oversized/null-byte/unicode args) | server.py + mcp SDK | — | **No issues found** — thorough fuzzing, clean result |
 
 ---
 
@@ -351,6 +354,10 @@ this API knows not to URL-encode query values.
 
 ## Things I looked at and did NOT find problems with
 
+- **Malformed/adversarial MCP tool arguments at the real wire-protocol
+  level** — done, see finding 17. Both the JSON-RPC envelope layer and
+  the tool-argument layer were fuzzed against a real running instance,
+  not just the underlying Python functions.
 - **Concurrency / race conditions on state-changing tools:** reviewed
   `server.py` for shared *in-process* mutable state that could race under
   concurrent `asyncio` requests (the auth middleware reads env vars fresh
@@ -379,3 +386,108 @@ this API knows not to URL-encode query values.
   (8.3 short names, `\\?\` prefixes, trailing dots/spaces, UNC paths). Flagging
   as **needs a real Windows target to verify**, not claiming it's broken
   or claiming it's safe.
+
+
+## 15. DNS-rebinding `allowed_hosts` has no port wildcard
+
+```python
+_transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=["localhost", "127.0.0.1"] + ([_allowed_host] if _allowed_host else []),
+    allowed_origins=["*"],
+)
+```
+
+The MCP SDK's `TransportSecurityMiddleware._validate_host` only accepts an
+**exact** match against `allowed_hosts`, or an entry ending in `":*"` as a
+port wildcard. None of the entries here end in `:*`. Confirmed live: a
+request to `/mcp` with `Host: 127.0.0.1:18010` (i.e., anything sent to a
+non-default port, which is what virtually every local/self-hosted/Docker
+deployment looks like) is rejected with `421 Misdirected Request` —
+*even with a fully correct bearer token* — while the exact same request
+with `Host: localhost` (bare, no port) succeeds.
+
+**This is not a vulnerability** — it fails *closed*, more restrictively
+than presumably intended, which is the opposite direction of a security
+hole. But it's worth fixing and worth documenting clearly, for two
+reasons: (1) it will confuse and block anyone trying to run/test this
+server locally or self-hosted behind anything other than Render's exact
+default-port HTTPS setup, and the confusing `421` error gives no hint
+that the fix is "match your Host header" — the natural instinct if you
+hit this is to work around it by *weakening* the check
+(`enable_dns_rebinding_protection=False` or `allowed_hosts=["*"]`-
+equivalent), which **would** be a real regression; (2) it's exactly the
+kind of gap this engagement exists to surface before someone "fixes" it
+the wrong way under time pressure.
+
+**Suggested fix:** add port-wildcard entries for the loopback cases —
+`"localhost:*"` and `"127.0.0.1:*"` — which the SDK already explicitly
+supports for this purpose. Leave the explicit `_allowed_host` production
+entry as an exact match (correct, since Render's edge forwards the bare
+external hostname).
+
+Confirmed via `tests/test_mcp_protocol_fuzzing.py::test_host_header_with_port_is_rejected_by_dns_rebinding_check`
+and its `_accepted` counterpart.
+
+## 16. Session ID alone, without the bearer token, is correctly rejected
+
+Verified a specific defense-in-depth property by trying to break it: after
+establishing a real, valid MCP session (real `initialize` handshake, real
+`Mcp-Session-Id`), I replayed that exact session ID from a *second,
+independent client that never sent the `Authorization` header at all*.
+
+**Result: `401 Unauthorized: Invalid or missing server password.`**
+
+This confirms `PasswordAuthMiddleware` runs on *every* request to `/mcp`,
+not just at session-creation time — so a session ID leaking on its own
+(via a proxy log, a referrer header, a misconfigured logging integration,
+etc., all realistic ways a session ID specifically — as opposed to an
+`Authorization` header — might end up somewhere it shouldn't) does not by
+itself grant access. This is exactly the property you'd want and it holds.
+Locked in as a regression test:
+`tests/test_mcp_protocol_fuzzing.py::test_stolen_session_id_without_bearer_token_is_rejected`.
+
+I also checked a forged/nonexistent session ID (with a valid bearer
+token) — cleanly rejected with `404 Session not found`, no crash, no
+information leakage about valid session ID shapes.
+
+## 17. Full wire-protocol fuzzing of `/mcp` — no issues found
+
+Rather than only calling `server.py`'s Python functions directly (which
+tests the tool logic but skips the actual JSON-RPC/MCP transport layer
+entirely), I drove a real `server.py` subprocess over a real socket with
+the actual MCP wire protocol — both with the official `mcp` SDK client
+(for a legitimate baseline handshake) and with raw, hand-crafted
+JSON-RPC bodies via `httpx` (for the adversarial cases), to see what
+happens *before* input ever reaches a tool function.
+
+**Envelope-level fuzzing** (missing/wrong `jsonrpc` field, missing/wrong-
+typed `method`, missing `id`, `id: null`, `params` as a string/null,
+extra unexpected top-level fields, batch-style JSON arrays, empty body,
+non-JSON body, truncated JSON, wrong `Content-Type`, missing `Accept`
+header): every single case produced a clean, well-formed 4xx with a
+proper JSON-RPC error code (`-32700` parse error, `-32602` invalid
+params, `-32600` bad request) or an appropriate HTTP status
+(`406 Not Acceptable` for a missing `Accept` header, `400` for a bad
+`Content-Type`). **No 500s, no stack traces, no crashes.** This is the
+`mcp` SDK's own Pydantic-based message validation doing its job — a nice
+contrast with organiser-agent.cpp's hand-rolled JSON parser (see finding
+14), which has no equivalent structural validation.
+
+**Tool-argument-level fuzzing** (once past the envelope, with a real
+session): missing required arguments, wrong types in every direction
+(int/null/list/dict/bool where a string was expected; string/float where
+an int was expected), an unknown tool name, an empty tool name, a
+path-traversal-shaped tool name, extra unexpected arguments, a 2 MB
+string argument, an embedded null byte, and unicode/emoji content — every
+case was caught and returned as a clean `isError: true` tool result with
+a specific, non-crashing Pydantic validation message (or, for the null
+byte, Python's own `ValueError: embedded null byte`, also caught
+cleanly). The server remained fully responsive after every single fuzzed
+request (verified with a follow-up real call each time). **No type-
+confusion bugs, no unhandled exceptions, no leaked internals beyond the
+tool/field names the caller already supplied themselves.**
+
+**Conclusion: this is a clean, thoroughly-tested result, not a skipped
+check.** 16 of the fuzz cases are now locked in as regression tests in
+`tests/test_mcp_protocol_fuzzing.py`.

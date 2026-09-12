@@ -67,11 +67,8 @@ Last broadcast read: 0008
   edits) — requires live infra, out of scope for this sandbox-only pass.
   Reviewed server.py for in-process shared-state races and found none,
   but that's not the same as testing the real thing.
-- Malformed/adversarial MCP tool arguments sent through the *real* MCP
-  JSON-RPC protocol layer (wrong types, missing fields at the wire
-  protocol level) — I tested the underlying Python functions directly and
-  the HTTP auth layer, but haven't yet driven a real MCP client/session
-  handshake against the `/mcp` endpoint end-to-end. Next up if resumed.
+- ~~Malformed/adversarial MCP tool arguments sent through the *real* MCP
+  JSON-RPC protocol layer~~ -- DONE this session, see the update below.
 - Revisit once pc-agent lands the in-exe secrets dashboard and base64
   read/write endpoints (broadcast [0006]) — the binary-transfer clean-
   failure behavior documented here may change once those land; the
@@ -85,3 +82,30 @@ Last broadcast read: 0008
   HTTPS now (clone/fetch/push), no more codespace SSH dependency for my
   own testing. All findings in SECURITY_FINDINGS.md were produced this
   way — compiled/run entirely locally, nothing touched real infra.
+
+## Update: MCP wire-protocol fuzzing (this session)
+Drove a real server.py subprocess with the actual MCP JSON-RPC wire
+protocol (both the official mcp SDK client for a legit baseline, and raw
+hand-crafted httpx requests for the adversarial cases) -- not just calling
+the underlying Python functions directly.
+
+- Found (documented as finding 15, low severity, fails CLOSED not open):
+  the DNS-rebinding `allowed_hosts` list has no port wildcard, so any
+  request with a port in its Host header gets 421'd, even with the
+  correct password. Breaks routine local/self-hosted testing. Real risk
+  is someone "fixing" this by weakening/disabling the DNS-rebinding
+  check entirely -- flagged clearly so that doesn't happen by accident.
+- Verified (finding 16, positive): a stolen/leaked session ID does NOT
+  work without the bearer token -- auth middleware runs on every request,
+  not just at session creation. Tried to break this specifically; it
+  held.
+- Full envelope + tool-argument fuzzing (finding 17): malformed JSON-RPC,
+  every wrong-type combination for tool args, oversized strings, null
+  bytes, unicode, unknown tools, missing/extra fields -- all handled
+  cleanly by the SDK's Pydantic validation, no crashes, no leaked
+  internals, no 500s anywhere. Clean, thorough, negative result.
+- 16 new regression tests in tests/test_mcp_protocol_fuzzing.py. Full
+  suite is now 66 passing tests across 6 test files.
+
+This closes out the "malformed/adversarial MCP tool arguments...at the
+wire protocol level" item from the previous "still to do" list.
