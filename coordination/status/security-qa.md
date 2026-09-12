@@ -1,0 +1,87 @@
+# security-qa status
+
+Last broadcast read: 0008
+
+## Done
+- Re-verified the admin-cookie-forgery fix (b28ab02) independently; still
+  holds. Searched for the same bug shape elsewhere in server.py — found
+  none there, but found a close analog in organiser-agent.cpp (see below).
+- Full pass over organiser-agent.cpp (compiled and dynamically tested as a
+  native Linux binary — it's written to be cross-platform for exactly this
+  reason). Found and confirmed exploitable:
+  - **HIGH: command injection via `working_dir` in `/run_command`**
+    (unescaped single-quote breakout on Linux; Windows path looks equally
+    exploitable via `"`/`&` but I have no Windows box to confirm — flagged
+    as unverified, not claimed).
+  - No-secret-configured leaves every endpoint open (documented behavior,
+    same bug shape as the admin-cookie issue, mitigated by loopback-only
+    binding).
+  - `/preview`'s `max_bytes` is unbounded and pre-allocates before
+    checking the real file size → std::bad_alloc DoS (confirmed, process
+    survives on Linux, Windows behavior unverified). **This chains
+    directly through server.py**: `pc_read_file_preview`'s `max_bytes`
+    param is forwarded with zero clamping — an MCP client can trigger this
+    on a real PC with one tool call.
+  - Secret comparison isn't constant-time (vs. server.py's correct
+    `hmac.compare_digest` everywhere).
+  - Oversized request bodies (>~64KB) are silently truncated with a
+    reported "success" — confirmed by actually POSTing 200KB and getting
+    back a corrupted 65,333-byte file with HTTP 200.
+  - `pc-tunnel@.service` uses `StrictHostKeyChecking=no` (LAN MITM risk,
+    low severity).
+- Systematic sweep of every shell-command-building f-string in server.py:
+  all properly escaped (`_q()`/shlex.quote or allowlist). Dynamically
+  fuzzed with quote/backtick/$()/&&/newline payloads against
+  server_read_file/move_file/write_file — no injection. **No findings** —
+  this is a real, positive result, not a skipped check.
+- Broadcast [0008] (file_transfer): tested path traversal (n/a — no
+  sandboxing exists anywhere in this codebase by design, confirmed via a
+  local-file-read test), malformed addresses (found two low-severity
+  silent-fallback gaps: empty PC name → silently uses "default"; unknown
+  account string → silently uses "auto" instead of erroring), oversized
+  file (15MB cap enforced on write for every kind, but read side has no
+  upfront cap — confirmed a >15MB "remote" source gets fully read+decoded
+  before rejection), PC-involved binary transfer (**verified end-to-end
+  against a real compiled organiser-agent that the "fails cleanly, doesn't
+  corrupt" claim is TRUE** — traced the exact mechanism: organiser-agent's
+  raw response is invalid UTF-8 for real binary content, the Linux-server
+  Python hop's strict decode() catches that and turns it into a clean
+  error before it ever reaches server.py), and codespace account switching
+  (works correctly for valid accounts; unknown account silently falls back
+  to "auto", noted above).
+- Wrote 50 passing regression tests across three new files
+  (`tests/test_organiser_agent_security.py`,
+  `tests/test_server_auth_and_injection.py`,
+  `tests/test_file_transfer_extra.py`) plus re-ran the existing
+  `tests/test_admin_cookie_auth.py` and `tests/test_file_transfer.py`
+  unchanged. Full writeup with severities and suggested fixes in
+  `SECURITY_FINDINGS.md` at repo root.
+
+## Still to do
+- Windows-only code paths in organiser-agent.cpp (working_dir injection
+  variant, is_protected_path canonicalization bypass tricks, max_bytes
+  allocator behavior) — need a real Windows target, flagged clearly as
+  unverified rather than guessed at.
+- Concurrency/race testing against real state-changing remote operations
+  (actual file writes on the live Linux server, actual Render env-var
+  edits) — requires live infra, out of scope for this sandbox-only pass.
+  Reviewed server.py for in-process shared-state races and found none,
+  but that's not the same as testing the real thing.
+- Malformed/adversarial MCP tool arguments sent through the *real* MCP
+  JSON-RPC protocol layer (wrong types, missing fields at the wire
+  protocol level) — I tested the underlying Python functions directly and
+  the HTTP auth layer, but haven't yet driven a real MCP client/session
+  handshake against the `/mcp` endpoint end-to-end. Next up if resumed.
+- Revisit once pc-agent lands the in-exe secrets dashboard and base64
+  read/write endpoints (broadcast [0006]) — the binary-transfer clean-
+  failure behavior documented here may change once those land; the
+  regression tests should catch that if it does.
+
+## Notes for the lead
+- Environment was flaky twice during this run: a codespace billing outage
+  (switched to legendary-space-train-g54xgqxwx6x2wvp9 per your message),
+  then the GitHub-MCP connector itself became unreliable mid-session, so I
+  moved all actual work to a local bash sandbox and only use git-over-
+  HTTPS now (clone/fetch/push), no more codespace SSH dependency for my
+  own testing. All findings in SECURITY_FINDINGS.md were produced this
+  way — compiled/run entirely locally, nothing touched real infra.
