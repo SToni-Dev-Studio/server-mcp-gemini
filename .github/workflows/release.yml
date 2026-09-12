@@ -1,0 +1,173 @@
+name: Release
+
+# Tag-triggered release pipeline: build the Windows PC agent, run the
+# existing tests + a basic sanity check on server.py, package everything
+# up, and publish it all to a GitHub Release named after the tag.
+#
+# This is separate from build-organiser-agent.yml, which publishes a
+# rolling "latest" build of just the .exe on every push to main. This
+# workflow only runs for actual version tags (or a manual dispatch) and
+# produces a versioned, immutable release with the server bundle + docs
+# attached too — not just the agent binary.
+#
+# NOTE for whoever lands agent/hub-cicd's CI workflow: the "test" job
+# below is intentionally minimal (run what already exists under tests/,
+# plus a syntax sanity check on server.py) — it is NOT meant to be the
+# project's real lint/test CI. If a fuller pytest suite / lint step
+# lands on main, prefer wiring that in here (or having this workflow
+# depend on that CI workflow's own status) over maintaining two
+# divergent test steps.
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >
+          Tag to release (must already exist, e.g. v1.2.3). Only needed
+          for a manual re-run; a real tag push fills this in automatically.
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-agent:
+    name: Build organiser-agent.exe
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build organiser-agent.exe
+        shell: cmd
+        run: cl /EHsc /O2 /std:c++17 organiser-agent.cpp /Fe:organiser-agent.exe
+
+      - name: Checksum
+        shell: bash
+        run: sha256sum organiser-agent.exe > organiser-agent.exe.sha256
+
+      - name: Upload agent + checksum
+        uses: actions/upload-artifact@v4
+        with:
+          name: organiser-agent-build
+          path: |
+            organiser-agent.exe
+            organiser-agent.exe.sha256
+          retention-days: 7
+
+  test:
+    name: Sanity checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: server.py syntax/import sanity check
+        run: |
+          python -c "import ast; ast.parse(open('server.py').read())"
+          echo "server.py parses cleanly"
+
+      - name: Run test suite
+        run: |
+          # pytest handles both styles present under tests/: plain
+          # module-level-assert scripts (e.g. test_admin_cookie_auth.py)
+          # and real pytest-fixture-based tests (e.g. test_file_transfer.py,
+          # which uses tmp_path). A plain `python <file>` per test file
+          # would silently no-op the fixture-based ones instead of
+          # running them, so don't do that here even though it looks
+          # simpler.
+          if ls tests/test_*.py >/dev/null 2>&1; then
+            pytest tests/ -v
+          else
+            echo "No tests/test_*.py found — nothing to run."
+          fi
+
+  package-and-release:
+    name: Package + publish release
+    needs: [build-agent, test]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download built agent
+        uses: actions/download-artifact@v4
+        with:
+          name: organiser-agent-build
+          path: dist/
+
+      - name: Build release info + server bundle
+        run: |
+          set -e
+          TAG="${{ steps.version.outputs.tag }}"
+          SHA="${GITHUB_SHA}"
+          DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+          cat > dist/RELEASE_INFO.txt <<EOF
+          server-mcp-claude release
+          Version:    ${TAG}
+          Commit:     ${SHA}
+          Built:      ${DATE}
+          Agent SHA256: $(cut -d' ' -f1 dist/organiser-agent.exe.sha256)
+          EOF
+
+          mkdir -p bundle
+          cp server.py requirements.txt Dockerfile start.sh "pc-tunnel@.service" bundle/
+          cp README.md ARCHITECTURE.md BUILD_AND_SETUP.md SKILL.md bundle/
+          mkdir -p bundle/scripts
+          cp scripts/install-organiser-agent.ps1 bundle/scripts/ 2>/dev/null || true
+          cp dist/RELEASE_INFO.txt bundle/
+
+          (cd bundle && zip -r "../server-mcp-claude-${TAG}.zip" .)
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "server-mcp-claude ${{ steps.version.outputs.tag }}"
+          generate_release_notes: true
+          body: |
+            Automated release of server-mcp-claude ${{ steps.version.outputs.tag }}
+            (commit ${{ github.sha }}).
+
+            **Assets:**
+            - `organiser-agent.exe` + `organiser-agent.exe.sha256` — Windows PC
+              agent. Install with `scripts/install-organiser-agent.ps1` (verifies
+              the checksum for you), or manually per `BUILD_AND_SETUP.md`.
+            - `server-mcp-claude-${{ steps.version.outputs.tag }}.zip` — server.py,
+              requirements.txt, Dockerfile/start.sh, pc-tunnel@.service, the
+              installer script, and all docs (README/ARCHITECTURE/BUILD_AND_SETUP/
+              SKILL) at this version.
+
+            See `ARCHITECTURE.md` in the bundle for known limitations before
+            deploying.
+          files: |
+            dist/organiser-agent.exe
+            dist/organiser-agent.exe.sha256
+            server-mcp-claude-${{ steps.version.outputs.tag }}.zip
