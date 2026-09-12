@@ -3,7 +3,7 @@ GitHub Codespaces MCP Server
 -----------------------------
 Exposes narrow, named tools for managing and executing commands in
 GitHub Codespaces, the user's Linux home server, one or more Windows
-PCs (via organiser-agent), and Plex — with multi-account GitHub
+PCs (via organiser-agent) — with multi-account GitHub
 fallback, password protection, and a browser-based admin dashboard.
 
 Auth:
@@ -25,8 +25,6 @@ PC organiser-agent routing:
     diagram. Multiple PCs are supported via the `PCS` env var (JSON
     registry) and a `pc` parameter on every pc_*/transfer__*_pc tool.
 
-Plex:
-    Set PLEX_URL (e.g. http://192.168.101.105:32400) and PLEX_TOKEN.
 
 Server Management:
     Set SERVER_HOST and SERVER_USER; auth via SSH_PRIVATE_KEY (raw key
@@ -68,8 +66,6 @@ load_dotenv()
 GITHUB_API = "https://api.github.com"
 RENDER_API = "https://api.render.com/v1"
 
-PLEX_URL = os.environ.get("PLEX_URL", "http://192.168.101.105:32400").rstrip("/")
-PLEX_TOKEN = os.environ.get("PLEX_TOKEN", "")
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "192.168.101.105")
 SERVER_USER = os.environ.get("SERVER_USER", "sepisotoni")
@@ -520,166 +516,16 @@ async def list_forwarded_ports(codespace_name: str, account: str = "auto") -> st
 
 
 # ---------------------------------------------------------------------------
-# Plex Control Tools
-# ---------------------------------------------------------------------------
-
-def _plex_headers() -> dict:
-    return {"X-Plex-Token": PLEX_TOKEN, "Accept": "application/json"}
-
-
-@mcp.tool()
-async def plex_search(query: str, media_type: str = "all") -> str:
-    """Search the Plex library for movies, shows, or anime by name."""
-    if not PLEX_TOKEN:
-        return "PLEX_TOKEN not configured in environment."
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{PLEX_URL}/search",
-                params={"query": query, "X-Plex-Token": PLEX_TOKEN},
-                headers={"Accept": "application/json"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as e:
-        return f"Plex unreachable: {e}"
-
-    results = []
-    items = data.get("MediaContainer", {}).get("Metadata", [])
-    for item in items[:10]:
-        title = item.get("title", "Unknown")
-        year = item.get("year", "")
-        media = item.get("type", "")
-        key = item.get("ratingKey", "")
-        results.append(f"- [{key}] {title} ({year}) — {media}")
-
-    return "\n".join(results) if results else f"No results found for '{query}'."
-
-
-@mcp.tool()
-async def plex_get_libraries() -> str:
-    """List all Plex libraries (anime, movies, TV shows, etc.)."""
-    if not PLEX_TOKEN:
-        return "PLEX_TOKEN not configured in environment."
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{PLEX_URL}/library/sections",
-                params={"X-Plex-Token": PLEX_TOKEN},
-                headers={"Accept": "application/json"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as e:
-        return f"Plex unreachable: {e}"
-
-    sections = data.get("MediaContainer", {}).get("Directory", [])
-    lines = [f"- [{s.get('key')}] {s.get('title')} ({s.get('type')})" for s in sections]
-    return "\n".join(lines) if lines else "No libraries found."
-
-
-@mcp.tool()
-async def plex_scan_library(library_key: str = "all") -> str:
-    """Trigger a Plex library scan to detect new anime/media files."""
-    if not PLEX_TOKEN:
-        return "PLEX_TOKEN not configured in environment."
-
-    url = f"{PLEX_URL}/library/sections/all/refresh" if library_key == "all" else f"{PLEX_URL}/library/sections/{library_key}/refresh"
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, params={"X-Plex-Token": PLEX_TOKEN}, timeout=15)
-    except httpx.HTTPError as e:
-        return f"Plex unreachable: {e}"
-
-    return f"Library scan triggered (section: {library_key}). Status: {resp.status_code}"
-
-
-@mcp.tool()
-async def plex_get_status() -> str:
-    """Get Plex server status, version, and active sessions."""
-    if not PLEX_TOKEN:
-        return "PLEX_TOKEN not configured in environment."
-
-    try:
-        async with httpx.AsyncClient() as client:
-            info_resp = await client.get(
-                f"{PLEX_URL}/", params={"X-Plex-Token": PLEX_TOKEN}, headers={"Accept": "application/json"}, timeout=15
-            )
-            info_resp.raise_for_status()
-            sess_resp = await client.get(
-                f"{PLEX_URL}/status/sessions",
-                params={"X-Plex-Token": PLEX_TOKEN},
-                headers={"Accept": "application/json"},
-                timeout=15,
-            )
-            sess_resp.raise_for_status()
-    except httpx.HTTPError as e:
-        return f"Plex unreachable: {e}"
-
-    info = info_resp.json().get("MediaContainer", {})
-    sessions = sess_resp.json().get("MediaContainer", {})
-    session_count = sessions.get("size", 0)
-    active = sessions.get("Metadata", [])
-
-    lines = [
-        f"**Plex Server:** {info.get('friendlyName', 'Unknown')}",
-        f"**Version:** {info.get('version', 'Unknown')}",
-        f"**Active Sessions:** {session_count}",
-    ]
-    for s in active:
-        user = s.get("User", {}).get("title", "Unknown")
-        title = s.get("title", "Unknown")
-        state = s.get("Player", {}).get("state", "unknown")
-        lines.append(f"  - {user} watching '{title}' ({state})")
-
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def plex_get_recently_added(count: int = 10) -> str:
-    """Get recently added media in Plex library."""
-    if not PLEX_TOKEN:
-        return "PLEX_TOKEN not configured in environment."
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"{PLEX_URL}/library/recentlyAdded",
-                params={"X-Plex-Token": PLEX_TOKEN, "X-Plex-Container-Size": count},
-                headers={"Accept": "application/json"},
-                timeout=15,
-            )
-            resp.raise_for_status()
-            data = resp.json()
-    except httpx.HTTPError as e:
-        return f"Plex unreachable: {e}"
-
-    items = data.get("MediaContainer", {}).get("Metadata", [])
-    lines = []
-    for item in items:
-        title = item.get("title", "Unknown")
-        added = item.get("addedAt", "")
-        media_type = item.get("type", "")
-        lines.append(f"- {title} ({media_type}) — added: {added}")
-
-    return "\n".join(lines) if lines else "No recently added media."
-
-
-# ---------------------------------------------------------------------------
 # Server Management Tools
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
 async def server_status() -> str:
-    """Get status of all services on the home Linux server (Plex, Sonarr, qBittorrent, etc.)."""
+    """Get status of all services on the home Linux server (Sonarr, qBittorrent, etc.)."""
     cmd = (
-        "systemctl is-active plexmediaserver sonarr jackett qbittorrent plex-watch "
-        "| paste - - - - - "
-        "| awk '{print \"plexmediaserver:\", $1, \"| sonarr:\", $2, \"| jackett:\", $3, \"| qbittorrent:\", $4, \"| plex-watch:\", $5}'"
+        "systemctl is-active sonarr jackett qbittorrent "
+        "| paste - - - "
+        "| awk '{print \"sonarr:\", $1, \"| jackett:\", $2, \"| qbittorrent:\", $3}'"
     )
     result = await _ssh_server(cmd)
     disk = await _ssh_server("df -h / /mnt/ssd | tail -2")
@@ -1140,79 +986,185 @@ async def pc__screenshot(save_path: str = "", pc: str = "default") -> str:
 
 
 # ---------------------------------------------------------------------------
-# File Transfer Tools (PC ↔ Sandbox ↔ Codespace ↔ Server)
+# File Transfer (sandbox <-> PC <-> server <-> codespace, any combination)
 # ---------------------------------------------------------------------------
+#
+# Replaces the earlier transfer__pc_to_sandbox / transfer__sandbox_to_pc /
+# transfer__sandbox_to_codespace / transfer__server_to_sandbox /
+# transfer__sandbox_to_server tools. Those covered only 5 of the ~10
+# meaningful directed pairs (no pc<->server, pc<->codespace,
+# server<->codespace, codespace<->codespace, or pc<->pc), and read local
+# files in TEXT mode (open(..., "r", encoding="utf-8", errors="replace")),
+# which silently corrupts any binary file (images, zips, .exe, etc).
+#
+# This tool moves bytes between ANY two endpoints, transported internally
+# as base64 so binary data survives intact.
+#
+# Address format for `source` / `destination` (a single string each):
+#   sandbox:<path>                          -- this server process's own local disk
+#   server:<path>                           -- the home Linux server, via SSH
+#   pc:<pc_name>:<path>                     -- a Windows PC, via organiser-agent
+#                                               (pc_name from the PCS registry,
+#                                               e.g. "desktop"; Windows paths
+#                                               like C:\\Users\\me\\f.txt are fine --
+#                                               only the first two colons are
+#                                               used as separators)
+#   codespace:<name>:<path>                 -- a GitHub Codespace, default account
+#   codespace:<name>@<account>:<path>       -- explicit account (auto/secondary/tertiary)
+#
+# Examples:
+#   file_transfer("pc:desktop:C:\\Users\\me\\report.pdf", "server:/home/user/report.pdf")
+#   file_transfer("codespace:my-space:/workspace/out.zip", "sandbox:/tmp/out.zip")
+#   file_transfer("sandbox:/tmp/build.tar", "codespace:my-space@tertiary:/workspace/build.tar")
+#
+# Known limitation (not this tool's bug, an upstream one): PC-side read/write
+# still goes through organiser-agent's /preview and /write_file endpoints,
+# which are currently TEXT-only. Binary transfers where a PC is the source
+# or destination will fail with a clear error until organiser-agent exposes
+# base64-safe file read/write endpoints. Every other pair (sandbox, server,
+# codespace, in any combination) is fully binary-safe today.
 
-@mcp.tool()
-async def transfer__pc_to_sandbox(remote_path: str, local_save_path: str, pc: str = "default") -> str:
-    """Download a (text) file from a PC into this sandbox, via organiser-agent."""
-    data = await _org_get("/preview", {"path": remote_path, "max_bytes": 10_000_000}, pc=pc)
-    content = data.get("content", "")
-    if not content:
-        return f"Could not read '{remote_path}' — empty or binary file."
-    import pathlib
-    pathlib.Path(local_save_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(local_save_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return f"Saved '{remote_path}' → '{local_save_path}' ({len(content)} bytes)"
+_FILE_TRANSFER_MAX_BYTES = 15 * 1024 * 1024  # 15 MB, pre-base64
 
 
-@mcp.tool()
-async def transfer__sandbox_to_pc(local_path: str, remote_dest_path: str, pc: str = "default") -> str:
-    """Upload a file from this sandbox to a PC, via organiser-agent."""
-    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-    data = await _org_post("/write_file", {"path": remote_dest_path, "content": content}, pc=pc)
-    return data.get("message", f"Uploaded '{local_path}' → '{remote_dest_path}'")
+def _parse_location(loc: str) -> tuple[str, str, str]:
+    """Returns (kind, name_or_account_str, path). name_or_account_str is
+    "" for sandbox/server, "<pc_name>" for pc, "<name>[@<account>]" for
+    codespace."""
+    if ":" not in loc:
+        raise ValueError(f"Malformed location '{loc}' -- expected 'kind:path' or 'kind:name:path'")
+    kind, rest = loc.split(":", 1)
+    kind = kind.strip().lower()
+    if kind in ("sandbox", "server"):
+        return kind, "", rest
+    if kind in ("pc", "codespace"):
+        if ":" not in rest:
+            raise ValueError(f"Malformed '{kind}:' location '{loc}' -- expected '{kind}:name:path'")
+        name, path = rest.split(":", 1)
+        return kind, name, path
+    raise ValueError(f"Unknown location kind '{kind}' -- expected sandbox, server, pc, or codespace")
 
 
-@mcp.tool()
-async def transfer__sandbox_to_codespace(
-    local_path: str, codespace_name: str, remote_path: str, account: str = "auto"
-) -> str:
-    """Copy a file from this sandbox into a GitHub Codespace."""
-    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-    encoded = base64.b64encode(content.encode()).decode()
-    gh = _gh_headers(_get_token(account)[0])
-    async with httpx.AsyncClient() as client:
-        r = await client.post(
-            f"https://api.github.com/user/codespaces/{codespace_name}/content",
-            headers=gh,
-            json={"path": remote_path, "content": encoded},
-            timeout=30,
+async def _location_read_bytes(loc: str) -> bytes:
+    kind, name, path = _parse_location(loc)
+
+    if kind == "sandbox":
+        with open(path, "rb") as f:
+            return f.read()
+
+    if kind == "server":
+        b64 = await _ssh_server(f"base64 -w0 {_q(path)} 2>&1")
+        try:
+            return base64.b64decode(b64, validate=False)
+        except Exception:
+            raise ValueError(f"Could not read '{path}' from server as a file (got: {b64[:200]!r})")
+
+    if kind == "pc":
+        data = await _org_get("/preview", {"path": path, "max_bytes": _FILE_TRANSFER_MAX_BYTES}, pc=name or "default")
+        content = data.get("content")
+        if content is None:
+            raise ValueError(
+                f"Could not read '{path}' from pc:{name} -- {data.get('error', 'empty or binary file (PC read is text-only today)')}"
+            )
+        return content.encode("utf-8")
+
+    if kind == "codespace":
+        cs_name, _, account = name.partition("@")
+        account = account or "auto"
+        b64_cmd = f"base64 -w0 {_q(path)} 2>&1"
+        result = await exec_command(cs_name, b64_cmd, account=account)
+        try:
+            return base64.b64decode(result.strip(), validate=False)
+        except Exception:
+            raise ValueError(f"Could not read '{path}' from codespace:{cs_name} (got: {result[:200]!r})")
+
+    raise AssertionError("unreachable")  # _parse_location already validated kind
+
+
+async def _location_write_bytes(loc: str, data: bytes) -> str:
+    kind, name, path = _parse_location(loc)
+
+    if len(data) > _FILE_TRANSFER_MAX_BYTES:
+        raise ValueError(
+            f"File is {len(data)} bytes, over the {_FILE_TRANSFER_MAX_BYTES} byte "
+            f"limit for file_transfer. Use a location-specific tool for large files."
         )
-    if r.status_code in (200, 201, 204):
-        return f"Transferred '{local_path}' → {codespace_name}:{remote_path}"
-    # Fallback: base64-safe write via exec, instead of a raw heredoc (which
-    # broke on content containing the literal delimiter text).
-    cmd = f"mkdir -p $(dirname {_q(remote_path)}) && echo {_q(encoded)} | base64 -d > {_q(remote_path)}"
-    result = await exec_command(codespace_name, cmd, account=account)
-    return f"Transferred via exec: {result}"
+
+    if kind == "sandbox":
+        import pathlib
+        pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(data)
+        return f"sandbox:{path} ({len(data)} bytes)"
+
+    if kind == "server":
+        encoded = base64.b64encode(data).decode()
+        result = await _ssh_server(
+            f"mkdir -p $(dirname {_q(path)}) && echo {_q(encoded)} | base64 -d > {_q(path)} && echo OK"
+        )
+        if "OK" not in result:
+            raise ValueError(f"Write to server:'{path}' failed: {result}")
+        return f"server:{path} ({len(data)} bytes)"
+
+    if kind == "pc":
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError(
+                f"pc:{name} write target got binary data -- organiser-agent's /write_file "
+                f"is text-only today, so this transfer can't complete as a binary write."
+            )
+        result = await _org_post("/write_file", {"path": path, "content": text}, pc=name or "default")
+        if result.get("error"):
+            raise ValueError(f"Write to pc:{name}:'{path}' failed: {result['error']}")
+        return f"pc:{name}:{path} ({len(data)} bytes)"
+
+    if kind == "codespace":
+        cs_name, _, account = name.partition("@")
+        account = account or "auto"
+        encoded = base64.b64encode(data).decode()
+        cmd = f"mkdir -p $(dirname {_q(path)}) && echo {_q(encoded)} | base64 -d > {_q(path)} && echo OK"
+        result = await exec_command(cs_name, cmd, account=account)
+        if "OK" not in result:
+            raise ValueError(f"Write to codespace:{cs_name}:'{path}' failed: {result}")
+        return f"codespace:{cs_name}:{path} ({len(data)} bytes)"
+
+    raise AssertionError("unreachable")
 
 
 @mcp.tool()
-async def transfer__server_to_sandbox(remote_path: str, local_save_path: str) -> str:
-    """Download a file from the Linux server into this sandbox via SSH."""
-    content = await _ssh_server(f"cat {_q(remote_path)} 2>&1")
-    import pathlib
-    pathlib.Path(local_save_path).parent.mkdir(parents=True, exist_ok=True)
-    with open(local_save_path, "w", encoding="utf-8") as f:
-        f.write(content)
-    return f"Saved server:'{remote_path}' → '{local_save_path}' ({len(content)} bytes)"
+async def file_transfer(source: str, destination: str) -> str:
+    """
+    Move a file between any two endpoints -- this sandbox, a PC, the Linux
+    server, or a GitHub Codespace -- in any direction/combination (pc to
+    server, codespace to codespace, pc to pc via the hub, etc).
 
+    Address format: "<kind>:<path>" for sandbox/server, "<kind>:<name>:<path>"
+    for pc/codespace (codespace also accepts "<name>@<account>:<path>").
+    See the comment above this tool in server.py for full examples.
 
-@mcp.tool()
-async def transfer__sandbox_to_server(local_path: str, remote_dest_path: str) -> str:
-    """Upload a file from this sandbox to the Linux server via SSH."""
-    with open(local_path, "r", encoding="utf-8", errors="replace") as f:
-        content = f.read()
-    encoded = base64.b64encode(content.encode()).decode()
-    result = await _ssh_server(
-        f"mkdir -p $(dirname {_q(remote_dest_path)}) && "
-        f"echo {_q(encoded)} | base64 -d > {_q(remote_dest_path)} && echo OK"
-    )
-    return f"Uploaded → server:'{remote_dest_path}': {result}"
+    Binary-safe (images, zips, executables) for every pair except when a PC
+    is either endpoint -- organiser-agent's file API is text-only today, so
+    a PC-involved transfer of a binary file will fail with a clear error
+    rather than silently corrupting the file.
+
+    Capped at 15 MB per transfer.
+    """
+    try:
+        data = await _location_read_bytes(source)
+    except ValueError as e:
+        return f"Read failed: {e}"
+    except Exception as e:
+        return f"Read failed ({type(e).__name__}): {e}"
+
+    try:
+        result = await _location_write_bytes(destination, data)
+    except ValueError as e:
+        return f"Write failed: {e}"
+    except Exception as e:
+        return f"Write failed ({type(e).__name__}): {e}"
+
+    return f"Transferred {source} -> {result}"
 
 
 # ---------------------------------------------------------------------------
@@ -1261,19 +1213,6 @@ async def _run_diagnostics() -> dict:
 
     await _check("Codespaces API", _codespaces())
 
-    # Plex
-    if PLEX_TOKEN:
-        async def _plex():
-            async with httpx.AsyncClient() as client:
-                r = await client.get(
-                    f"{PLEX_URL}/", params={"X-Plex-Token": PLEX_TOKEN}, headers={"Accept": "application/json"}, timeout=10
-                )
-            r.raise_for_status()
-            return f"reachable ({r.json().get('MediaContainer', {}).get('friendlyName', '?')})"
-
-        await _check("Plex", _plex())
-    else:
-        checks.append({"name": "Plex", "status": "skip", "detail": "PLEX_TOKEN not configured"})
 
     # Linux server
     async def _server():
@@ -1315,7 +1254,7 @@ async def _run_diagnostics() -> dict:
 @mcp.tool()
 async def run_diagnostics() -> str:
     """
-    Test every configured subsystem (GitHub tokens, Codespaces API, Plex,
+    Test every configured subsystem (GitHub tokens, Codespaces API,
     Linux server, each configured PC's organiser-agent, Render API) and
     report pass/fail/skip for each. Use this to verify the whole stack
     after making config changes.
@@ -1672,7 +1611,6 @@ async def _root(request: Request) -> JSONResponse:
             "auth_enabled": bool(os.environ.get("MCP_SERVER_PASSWORD")),
             "admin_enabled": bool(ADMIN_PASSWORD),
             "render_admin_configured": bool(RENDER_API_KEY),
-            "plex_configured": bool(PLEX_TOKEN),
             "server_configured": bool(SERVER_HOST),
             "pcs_configured": sorted(_PC_REGISTRY.keys()),
             "accounts": {
