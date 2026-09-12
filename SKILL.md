@@ -19,7 +19,7 @@ description: >
 
 This MCP server (`codespaces-mcp`, deployed on Render) bridges Claude to
 personal infrastructure via a single HTTPS endpoint: one or more Windows
-PCs, a Linux home server, and GitHub Codespaces. ~45 tools across 5
+PCs, a Linux home server, and GitHub Codespaces. 43 tools across 5
 groups, plus a browser admin dashboard. Always pick the most specific tool.
 
 > Plex support has been removed entirely (all `plex_*` tools, `PLEX_URL`/

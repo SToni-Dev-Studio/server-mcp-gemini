@@ -7,7 +7,7 @@ full tool-by-tool reference, see `SKILL.md`.
 ## What this is
 
 A single remote MCP server (`server.py`, Python/FastMCP, deployed on
-Render) that gives Claude ~45 narrow tools across five areas instead of
+Render) that gives Claude 43 narrow tools across five areas instead of
 one broad "do anything" tool:
 
 1. GitHub Codespaces lifecycle (create/stop/rebuild/resize, exec a

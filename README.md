@@ -1,6 +1,6 @@
 # codespaces-mcp
 
-A remote MCP server that gives Claude ~45 narrow, purpose-built tools —
+A remote MCP server that gives Claude 43 narrow, purpose-built tools —
 instead of one broad "do anything" tool — for managing personal
 infrastructure: GitHub Codespaces, a Linux home server, and one or more
 Windows PCs, all through a single HTTPS endpoint. Includes a
