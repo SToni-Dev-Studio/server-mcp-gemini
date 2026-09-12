@@ -61,12 +61,30 @@ release's published `.sha256` file, installs it to
 installing fresh, registers/refreshes the Scheduled Task from §3, and
 verifies the agent actually responds on `/status` afterward.
 
-```powershell
-# Run in an elevated PowerShell prompt:
-irm https://raw.githubusercontent.com/<owner>/<repo>/main/scripts/install-organiser-agent.ps1 | iex
+This repo is **private**, so the `irm <raw-url> | iex` one-liner some
+public projects use won't work here (raw file URLs on a private repo
+also require GitHub auth) -- get the script one of these ways instead:
 
-# Or, having downloaded the script:
+```powershell
+# Option A: you already have the repo cloned somewhere on this PC
+# (e.g. via git, or synced from a codespace):
+Copy-Item \path\to\clone\scripts\install-organiser-agent.ps1 .
+
+# Option B: download it from a tagged release's bundle zip
+# (server-mcp-claude-<tag>.zip, published by .github/workflows/release.yml)
+# -- unzip it, then run the copy inside scripts\.
+
+# Then, in an elevated PowerShell prompt, from wherever you put it:
 .\install-organiser-agent.ps1 -Secret "your_secret_here" -Port 7842
+```
+
+Because the repo is private, the script also needs a `-GitHubToken`
+with at least read access to Releases to actually download the asset
+(the GitHub API's release-asset endpoint requires auth for a private
+repo, same as the raw-URL case above) -- pass a PAT:
+
+```powershell
+.\install-organiser-agent.ps1 -Secret "your_secret_here" -Port 7842 -GitHubToken "ghp_..."
 ```
 
 See the script's own header comment for the full flag list (`-Version`
