@@ -35,6 +35,8 @@ writing (`python3 -m pytest tests/ -v`).
 | 15 | DNS-rebinding `allowed_hosts` has no port wildcard — breaks local/self-hosted access | server.py | Low (availability, fails closed) | Confirmed |
 | 16 | Session ID alone (no bearer token) is rejected — auth runs per-request | server.py | — | **Confirmed secure** — positive finding |
 | 17 | MCP wire-protocol fuzzing (malformed JSON-RPC, wrong tool-arg types, oversized/null-byte/unicode args) | server.py + mcp SDK | — | **No issues found** — thorough fuzzing, clean result |
+| 18 | `mkdir -p $(dirname ...)` word-splits on paths with spaces — write fails, creates wrong garbage dirs | server.py (3 call sites) | Low-Medium (reliability, not access) | Confirmed, fix verified |
+| 19 | Independent re-verification of lead's 4 fixes (commit 7dc1695) | server.py | — | **All 4 confirmed sound** |
 
 ---
 
@@ -491,3 +493,102 @@ tool/field names the caller already supplied themselves.**
 **Conclusion: this is a clean, thoroughly-tested result, not a skipped
 check.** 16 of the fuzz cases are now locked in as regression tests in
 `tests/test_mcp_protocol_fuzzing.py`.
+
+
+## 18. `mkdir -p $(dirname ...)` word-splits on paths containing spaces
+
+Three call sites build a write command like this:
+
+```python
+cmd = f"mkdir -p $(dirname {_q(path)}) && echo {_q(encoded)} | base64 -d > {_q(path)} && echo OK"
+```
+
+`{_q(path)}` (the argument *to* `dirname`) is correctly shell-quoted. But
+the **command substitution itself, `$(dirname ...)`, is not** — its
+*output* (the directory name `dirname` computes) is substituted back into
+the command unquoted, so it undergoes normal shell word-splitting. Any
+path with a space in a directory component — a completely ordinary input,
+not an exotic attack string (`"My Files/notes.txt"`, `"Program Files
+(x86)/..."`, anything a real user might name a folder) — breaks this.
+
+**Verified by executing the real, actual command `server.py` constructs**
+(not a hand-reproduction) in a real shell, in an isolated temp directory:
+
+```
+$ mkdir -p $(dirname '/tmp/.../my dir/file.txt') && ... 
+bash: line 1: /tmp/.../my dir/file.txt: No such file or directory
+```
+
+`dirname`'s output (`/tmp/.../my dir`) gets word-split into two arguments,
+so `mkdir -p` creates **two wrong directories** (`.../my` and a
+*relative* `dir` in whatever the shell's current working directory
+happens to be) instead of the one intended directory. The subsequent
+`>` redirect then fails because the real parent directory was never
+created.
+
+**Not a security vulnerability** — no silent corruption occurs, because
+all three call sites already check for an explicit success marker
+(`"OK"` / `"__WRITE_OK__"`) in the result and raise/report a clean
+failure when it's missing (two of these checks predate this finding;
+the third — `write_codespace_file`'s — was *added* by the lead's fix in
+7dc1695 for an unrelated reason, and happens to also catch this cleanly
+as a nice side effect). But it's a real reliability bug that will fail
+on an entirely mundane input, and leaves stray, oddly-named directories
+behind as debris.
+
+**Affected:** `write_codespace_file`, and `file_transfer`'s `server:` and
+`codespace:` write paths (`_location_write_bytes`). **Not affected:**
+`file_transfer`'s `sandbox:` write path, which correctly uses
+`pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)` instead of
+a shell one-liner.
+
+**Note on provenance:** this pattern already existed in `file_transfer`'s
+`server:`/`codespace:` write paths *before* the lead's fix commit — I
+missed it in my own first pass (I was focused on the *quoting*
+correctness of `_q()`'s output, not on the *unquoted command
+substitution* wrapping it). The lead's fix for `write_codespace_file`
+replicated the same pre-existing pattern into a third location. Flagging
+this plainly rather than implying I caught it the first time around.
+
+**Suggested fix, verified to work:** quote the command substitution —
+`mkdir -p "$(dirname {_q(path)})"` (just add `"..."` around `$(...)`).
+Confirmed this resolves it cleanly: same real command, same real shell,
+now succeeds and creates exactly the one intended directory.
+
+Regression tests (which execute the real, actual constructed command,
+not a reproduction) in
+`tests/test_server_auth_and_injection.py::test_write_codespace_file_mkdir_breaks_on_path_with_space`
+and `::test_file_transfer_server_write_mkdir_breaks_on_path_with_space`.
+
+## 19. Independent re-verification of the lead's 4 fixes (commit 7dc1695)
+
+Per my own rule of never trusting a claim without checking it myself
+(the same standard I'd want applied to my own findings), I read the full
+diff and independently re-verified each of the 4 fixes the lead applied
+from earlier docs-release/security-qa findings, rather than just
+trusting that their own accompanying tests (`test_lead_fixes_round2.py`,
+which do pass) were sufficient:
+
+1. **`write_codespace_file` success-checking** — sound. Also directly
+   surfaces finding 18 above as a clean failure instead of a false
+   "success", which is a nice side benefit.
+2. **`pc_read_file_preview` 2 MB clamp** — verified this genuinely closes
+   the demonstrated DoS: the worst case is now a bounded 2 MB allocation
+   (harmless) instead of an attacker-chosen unbounded one. Not a
+   substitute for the real fix in organiser-agent.cpp itself (correctly
+   scoped to pc-agent), but effective defense in depth as advertised.
+3. **`_get_token` rejects unknown accounts** — checked both call sites
+   (`exec_command`, `_gh_request_with_fallback`) and confirmed the new
+   `ValueError` surfaces cleanly through the real MCP wire protocol as a
+   normal `isError: true` tool result (tested live: `list_codespaces`
+   with a bogus account returns a clean error message, no 500, no
+   traceback) — not just that the unit test around the raw function
+   passes.
+4. **Empty pc:/codespace: name rejection** — hand-checked the `name@account`
+   edge cases the lead's own tests didn't explicitly enumerate (empty
+   name with a real account present — `"codespace:@tertiary:/x"` — empty
+   account with a real name present, and both empty) — all handled
+   correctly by the `name.split("@", 1)[0]` check.
+
+**Conclusion: all 4 fixes hold up under independent re-verification.**
+No regressions found in this round of double-checking.

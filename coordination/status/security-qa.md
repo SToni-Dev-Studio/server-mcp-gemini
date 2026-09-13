@@ -109,3 +109,50 @@ the underlying Python functions directly.
 
 This closes out the "malformed/adversarial MCP tool arguments...at the
 wire protocol level" item from the previous "still to do" list.
+
+
+## Update: closed remaining brief gaps + caught a new bug in the lead's own fix
+- Systematic fuzz sweep across ALL 43 tools' string parameters (not just a
+  hand-picked sample) -- discovered dynamically via tools/list at run
+  time, 19 adversarial payloads each, network fully mocked. 1420 calls in
+  the full engagement run, 0 findings. Locked in as
+  tests/test_all_tools_fuzz_sweep.py (trimmed payload set for CI speed).
+- Actually fired concurrent requests at state-changing tools (not just
+  reasoned about them, per the brief's explicit ask): 25-30 truly
+  concurrent async server_write_file calls with unique per-call markers
+  and an artificial mock delay to force interleaving -- zero
+  cross-contamination. Also fired 20 concurrent writes to the SAME path
+  -- no crashes/hangs/exceptions. Confirmed _admin_api_env_set PUTs each
+  key independently (no read-modify-write pattern), so there's no local
+  lost-update race to find in that code. tests/test_concurrency.py.
+- Filled in dynamic injection-resistance proof for the remaining
+  brief-named tools I'd only statically reviewed before:
+  server_delete_file, read_codespace_file, write_codespace_file, and
+  exec_command's codespace_name (confirmed it's argv-based, not shell --
+  can't be locally injected regardless of content).
+- Independently re-verified all 4 fixes the lead applied in 7dc1695
+  (from earlier docs-release/security-qa findings) rather than trusting
+  their own passing tests alone -- checked edge cases their tests didn't
+  cover (name@account combinations, exception surfacing through the real
+  wire protocol). All 4 hold up.
+- **New finding while doing that verification** (finding 18): the
+  `mkdir -p $(dirname {_q(path)})` pattern in three write paths
+  (write_codespace_file, file_transfer's server:/codespace: writes) has
+  an unquoted command substitution, so it word-splits on any path with a
+  space in a directory component -- verified by actually running the
+  real constructed command in a real shell; it creates two wrong garbage
+  directories and the write fails. Not a security hole (fails cleanly,
+  the existing "OK"/"__WRITE_OK__" checks catch it), but a real
+  reliability bug on a completely ordinary input. This pattern predates
+  the lead's fix (already in file_transfer) -- I missed it in my first
+  pass and only caught it while double-checking the fix commit. Suggested
+  fix verified to work: quote the substitution,
+  `mkdir -p "$(dirname {_q(path)})"`.
+- Full suite: 110 passing tests across 8 files.
+
+## Next
+- pc-agent has landed real commits (6f5d451) -- per the brief, this is
+  now the priority: attempt the same attack categories against whatever
+  they built. Haven't looked yet as of this status update.
+- Still open: Windows-only organiser-agent.cpp paths (no Windows box),
+  races against real remote infra (out of scope).
