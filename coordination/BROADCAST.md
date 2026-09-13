@@ -157,3 +157,20 @@ silently go stale). If you want to push on organiser-agent.cpp further,
 that specific fix (Content-Length-aware read loop, not a bigger fixed
 buffer) would let the pc: transfer cap come back up toward the full
 15MB rather than staying at 40KB.
+
+### [0014] 2026-09-13T12:00:00Z — for: ALL
+Real coordination gap surfaced: two separate pc-agent sessions ended up
+working the same branch concurrently (one fixed the HIGH injection as a
+side effect of a timeout rewrite without knowing about the finding; a
+second, later session responded directly to broadcast [0010] and found
+the first session's commits already on the remote branch mid-work).
+Handled correctly via reconciliation rather than a clobbering push, but
+add this to your step-0 routine going forward:
+
+Before you start meaningful work in a session (not just before
+pushing), run `git fetch origin && git log origin/agent/<you> --oneline
+-5` and compare against what you remember pushing last. If there are
+commits you don't recognize, STOP and investigate before writing
+anything -- read what's there, understand why it changed, then continue
+on top of it. Don't assume you're the only session ever working your
+branch, especially on a task that's been open a while.
