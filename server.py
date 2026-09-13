@@ -1060,6 +1060,17 @@ async def pc__screenshot(save_path: str = "", pc: str = "default") -> str:
 
 _FILE_TRANSFER_MAX_BYTES = 15 * 1024 * 1024  # 15 MB, pre-base64
 
+# organiser-agent.cpp's handle_conn reads HTTP requests into a fixed
+# 65536-byte buffer and silently truncates anything larger -- reporting
+# HTTP 200 success on the truncated write regardless (SECURITY_FINDINGS.md
+# finding 7, confirmed independently by lead while wiring this up: a
+# 128,000-byte test payload silently landed on disk as 48,981 bytes).
+# Until that's fixed in organiser-agent.cpp, file_transfer enforces a much
+# lower cap specifically for the pc: leg -- shipping the full 15MB cap
+# while knowing anything over ~48KB silently corrupts would make this
+# tool actively unsafe to trust for PC transfers.
+_PC_TRANSFER_SAFE_MAX_BYTES = 40_000  # raw bytes, pre-base64; conservative margin under the 64KB buffer incl. JSON/base64 overhead
+
 
 def _parse_location(loc: str) -> tuple[str, str, str]:
     """Returns (kind, name_or_account_str, path). name_or_account_str is
@@ -1100,13 +1111,18 @@ async def _location_read_bytes(loc: str) -> bytes:
             raise ValueError(f"Could not read '{path}' from server as a file (got: {b64[:200]!r})")
 
     if kind == "pc":
-        data = await _org_get("/preview", {"path": path, "max_bytes": _FILE_TRANSFER_MAX_BYTES}, pc=name or "default")
-        content = data.get("content")
-        if content is None:
-            raise ValueError(
-                f"Could not read '{path}' from pc:{name} -- {data.get('error', 'empty or binary file (PC read is text-only today)')}"
-            )
-        return content.encode("utf-8")
+        # Binary-safe as of agent/pc-agent's /read_file_b64 endpoint
+        # (see coordination/status/pc-agent.md, broadcast [0006]) --
+        # this used to go through /preview, which is text/UTF-8 only
+        # and silently failed on any binary file.
+        data = await _org_get("/read_file_b64", {"path": path, "max_bytes": _FILE_TRANSFER_MAX_BYTES}, pc=name or "default")
+        content_b64 = data.get("content_b64")
+        if content_b64 is None:
+            raise ValueError(f"Could not read '{path}' from pc:{name} -- {data.get('error', 'unknown error')}")
+        try:
+            return base64.b64decode(content_b64, validate=True)
+        except Exception as e:
+            raise ValueError(f"pc:{name} returned invalid base64 for '{path}': {e}")
 
     if kind == "codespace":
         cs_name, _, account = name.partition("@")
@@ -1147,14 +1163,23 @@ async def _location_write_bytes(loc: str, data: bytes) -> str:
         return f"server:{path} ({len(data)} bytes)"
 
     if kind == "pc":
-        try:
-            text = data.decode("utf-8")
-        except UnicodeDecodeError:
+        # Binary-safe as of agent/pc-agent's content_b64 support on
+        # /write_file (see coordination/status/pc-agent.md, broadcast
+        # [0006]) -- always sent as base64 now, text or binary alike, so
+        # there's no encoding-mismatch failure mode to special-case here.
+        # Capped well below _FILE_TRANSFER_MAX_BYTES -- see the comment
+        # on _PC_TRANSFER_SAFE_MAX_BYTES above (organiser-agent silently
+        # truncates larger requests instead of erroring).
+        if len(data) > _PC_TRANSFER_SAFE_MAX_BYTES:
             raise ValueError(
-                f"pc:{name} write target got binary data -- organiser-agent's /write_file "
-                f"is text-only today, so this transfer can't complete as a binary write."
+                f"File is {len(data)} bytes -- pc: transfers are capped at "
+                f"{_PC_TRANSFER_SAFE_MAX_BYTES} bytes until SECURITY_FINDINGS.md "
+                f"finding 7 (organiser-agent's fixed-size request buffer silently "
+                f"truncates larger writes) is fixed. Larger transfers would risk "
+                f"silent data corruption, not just a slower transfer."
             )
-        result = await _org_post("/write_file", {"path": path, "content": text}, pc=name or "default")
+        encoded = base64.b64encode(data).decode("ascii")
+        result = await _org_post("/write_file", {"path": path, "content_b64": encoded}, pc=name or "default")
         if result.get("error"):
             raise ValueError(f"Write to pc:{name}:'{path}' failed: {result['error']}")
         return f"pc:{name}:{path} ({len(data)} bytes)"
@@ -1183,10 +1208,8 @@ async def file_transfer(source: str, destination: str) -> str:
     for pc/codespace (codespace also accepts "<name>@<account>:<path>").
     See the comment above this tool in server.py for full examples.
 
-    Binary-safe (images, zips, executables) for every pair except when a PC
-    is either endpoint -- organiser-agent's file API is text-only today, so
-    a PC-involved transfer of a binary file will fail with a clear error
-    rather than silently corrupting the file.
+    Binary-safe (images, zips, executables) for every pair, including a
+    PC as either endpoint, via organiser-agent's base64 file API.
 
     Capped at 15 MB per transfer.
     """
