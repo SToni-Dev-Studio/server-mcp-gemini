@@ -154,7 +154,7 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
 
 - **organiser-agent.py lacks path protection.** Covered above — don't
   run it in production.
-- **`file_transfer`'s PC leg is text-only.** Covered above.
+- **`file_transfer`'s PC leg is text-only.** Covered above. (The underlying binary-safe agent endpoints now exist on `agent/pc-agent`, pending merge + server.py wiring — see "Pending: agent/pc-agent's fixes" below.)
 - **PC secret pairing isn't enforced.** The `PCS` registry's `secret`
   for a given PC name must be manually kept in sync with that PC's own
   `ORGANISER_SECRET`. Nothing on either side verifies the pairing is
@@ -164,10 +164,9 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
   drifted, but won't tell you *why*.
 - **No PC identity/registration handshake.** An agent doesn't know its
   own configured name; it's implicit in which tunnel/port you're
-  routing through. `coordination/tasks/pc-agent.md` covers giving each
-  agent build awareness of its own name, plus moving the PC-side
-  config (secret, name, allowed paths) into the agent itself instead of
-  external env vars/scheduled-task args.
+  routing through. Addressed on `agent/pc-agent` (machine_id/
+  machine_name via `/status`), pending merge — see "Pending:
+  agent/pc-agent's fixes" below.
 - **`/run_command` (both agent builds, and `server_run_command`) is
   intentionally close to unrestricted.** `server_run_command`'s blocklist
   is explicitly documented in-code as "a footgun-prevention nicety, not
@@ -196,11 +195,11 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
 
 ## Confirmed security findings (agent/security-qa)
 
-`agent/security-qa` has pushed real, independently-verified findings
-(not yet merged to `main` as of this writing — see
-`coordination/status/security-qa.md` and `SECURITY_FINDINGS.md` on that
-branch for full detail, severities, and suggested fixes). Summarizing
-the confirmed, actionable ones here so they aren't easy to miss:
+`agent/security-qa`'s findings are now merged to `main` — see
+`SECURITY_FINDINGS.md` at repo root for full detail, severities, and
+suggested fixes, and `coordination/status/security-qa.md` for how each
+was verified. Summarizing the confirmed, actionable ones here so they
+aren't easy to miss:
 
 - **Command injection via `working_dir` in organiser-agent's
   `/run_command`** (separate from, and worse than, the "intentionally
@@ -247,6 +246,54 @@ check. One usability-only finding from that pass: the DNS-rebinding
 gets rejected even with the correct password — breaks routine local
 testing (fails closed, not a security bug, but worth knowing if `/mcp`
 seems to reject valid local requests).
+
+## Pending: agent/pc-agent's fixes (landed on their branch, not yet merged to main)
+
+`agent/pc-agent` has pushed 4 commits addressing several of the gaps
+above, tested against a compiled Linux build (see
+`coordination/status/pc-agent.md` on that branch for full test detail —
+33 new tests, one explicit `expectedFailure` for a POSIX-vs-Windows
+path-semantics artifact that can only be confirmed on real Windows).
+**None of this is on `main` yet** — everything below is what will
+change once it's merged, not current behavior:
+
+- **Machine identity**: `/status` on both agent builds now returns a
+  persistent `machine_id`/`machine_name`, addressing "No PC
+  identity/registration handshake" above. `server.py`'s `PCS` registry
+  remains the source of truth for hub-side routing — this doesn't
+  replace it, it just lets the agent know its own name too.
+- **Binary-safe file transfer endpoints**: a new `/read_file_b64` (GET)
+  and a `content_b64` field on `/write_file` (POST), verified
+  byte-identical round-trip in testing. **This does not yet fix
+  `file_transfer`'s PC-side text-only limitation on its own** — that
+  wiring lives in `server.py` (calling these new endpoints instead of
+  `/preview`/`/write_file`'s old text-only form), which is outside both
+  pc-agent's and this docs pass's scope. Until someone wires it,
+  `file_transfer` still can't move binary data to/from a PC even after
+  this merges.
+- **A local `/config` + `/admin` dashboard on the agent itself**,
+  letting `machine_name`/`secret` be set without hand-editing env vars
+  or the Scheduled Task — hot-reloads without a restart. An
+  environment-variable secret still wins over a config-file one if both
+  are present.
+- **`organiser-agent.py` now has the same protected-path guard
+  `organiser-agent.cpp` already had** — the "legacy build has no path
+  protection" gap in the comparison table above no longer applies once
+  this merges (it remains true of the version on `main` today).
+- **A real, verified bug fix**: `organiser-agent.cpp`'s `/run_command`
+  had no timeout at all (`popen()` blocks until the child exits,
+  indefinitely) — confirmed by actually hanging a `sleep 90` against a
+  60s deadline and watching the process group get killed via `ps aux`.
+  Fixed for the POSIX path; the equivalent Windows fix (Job Objects) is
+  code-reviewed but **not compiled or run** — no Windows toolchain was
+  available to verify it.
+- On the "PC secret pairing isn't enforced" point above: pc-agent looked
+  into this specifically and concluded there's no *architectural*
+  ambiguity to resolve (one agent process is one physical machine with
+  exactly one secret, so there's no "which PC's secret" question for the
+  agent side to answer) — worth knowing as context, though it doesn't
+  change the operational fact that nothing double-checks the two sides
+  were typed identically when you provision a PC.
 
 ## Where things live (quick map)
 
