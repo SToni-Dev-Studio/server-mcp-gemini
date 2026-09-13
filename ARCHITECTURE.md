@@ -152,9 +152,14 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
 
 ## Known limitations
 
+> `write_codespace_file` used to always report success even when its
+> target directory didn't exist yet — fixed in commit `7dc1695` (it now
+> `mkdir -p`s the parent and checks for an explicit success marker). Not
+> listed below anymore since it's no longer true.
+
 - **organiser-agent.py lacks path protection.** Covered above — don't
   run it in production.
-- **`file_transfer`'s PC leg is text-only.** Covered above.
+- **`file_transfer`'s PC leg is text-only.** Covered above. (The underlying binary-safe agent endpoints now exist on `agent/pc-agent`, pending merge + server.py wiring — see "Pending: agent/pc-agent's fixes" below.)
 - **PC secret pairing isn't enforced.** The `PCS` registry's `secret`
   for a given PC name must be manually kept in sync with that PC's own
   `ORGANISER_SECRET`. Nothing on either side verifies the pairing is
@@ -164,26 +169,26 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
   drifted, but won't tell you *why*.
 - **No PC identity/registration handshake.** An agent doesn't know its
   own configured name; it's implicit in which tunnel/port you're
-  routing through. `coordination/tasks/pc-agent.md` covers giving each
-  agent build awareness of its own name, plus moving the PC-side
-  config (secret, name, allowed paths) into the agent itself instead of
-  external env vars/scheduled-task args.
+  routing through. Addressed on `agent/pc-agent` (machine_id/
+  machine_name via `/status`), pending merge — see "Pending:
+  agent/pc-agent's fixes" below.
 - **`/run_command` (both agent builds, and `server_run_command`) is
   intentionally close to unrestricted.** `server_run_command`'s blocklist
   is explicitly documented in-code as "a footgun-prevention nicety, not
   a real security boundary." Treat every `*_run_command` tool as
-  equivalent to a real shell on that machine.
-- **`write_codespace_file` doesn't verify its own write.** It always
-  reports success even if the target directory doesn't exist yet (the
-  underlying command has no `mkdir -p` and the tool doesn't check the
-  exec result). Create the parent directory first if it might be new.
+  equivalent to a real shell on that machine. This is a deliberate design
+  choice, not a bug — but see the next item for a *specific, confirmed*
+  vulnerability in how one of its arguments is handled, which is a bug.
 - **`create_git_commit_and_push` only stages already-tracked files**
   (`git add -u`) — brand-new untracked files need an explicit `git add`
   first.
-- **No CI test/lint step for `server.py` yet.** Only
-  `tests/test_admin_cookie_auth.py` and `tests/test_file_transfer.py`
-  exist today. See `coordination/status/hub-cicd.md` for whether a real
-  CI workflow has landed.
+- **No CI test/lint step for `server.py` yet** — the tests exist
+  (77 passing across 7 files under `tests/`, verified locally with
+  `pytest tests/` as of this writing) but nothing runs them
+  automatically on push/PR. `.github/workflows/release.yml` runs them
+  as part of a tagged release, which is a different thing (see its own
+  in-file note). See `coordination/status/hub-cicd.md` for whether a
+  real CI workflow has landed.
 - **Fly vs Render** — see above.
 - **No rate limiting** on the MCP bearer-token check beyond the
   constant-time comparison itself; a very determined attacker with
@@ -191,6 +196,115 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
 - **Admin dashboard is single-admin by design** — one shared password,
   one HMAC secret, no per-user accounts. Fine for personal
   infrastructure, not intended for multiple distinct admins.
+
+## Confirmed security findings (agent/security-qa)
+
+`agent/security-qa`'s findings are now merged to `main` — see
+`SECURITY_FINDINGS.md` at repo root for full detail, severities, and
+suggested fixes, and `coordination/status/security-qa.md` for how each
+was verified. Summarizing the confirmed, actionable ones here so they
+aren't easy to miss:
+
+- **Command injection via `working_dir` in organiser-agent's
+  `/run_command`** (separate from, and worse than, the "intentionally
+  unrestricted by design" point above — this is an argument-handling
+  bug, not a design choice). Confirmed exploitable on Linux; the
+  equivalent Windows path is suspected but **unverified** (no Windows
+  test target was available for that pass).
+- **`/preview`'s `max_bytes` is unbounded and pre-allocates before
+  checking the real file size**, causing a crash-the-process DoS in
+  organiser-agent — confirmed. **Partially fixed**: `server.py`'s
+  `pc_read_file_preview` now clamps `max_bytes` to 2 MB server-side
+  (commit `7dc1695`), closing the path reachable from an ordinary MCP
+  tool call. The underlying bug — organiser-agent itself allocating
+  before checking the real file size — is **still open** at the agent
+  level; it's pc-agent's scope to fix for real, and the server-side
+  clamp is explicitly documented in-code as defense in depth, not a
+  substitute for that.
+- **organiser-agent's secret comparison isn't constant-time**, unlike
+  `server.py`'s `hmac.compare_digest` everywhere else in this project —
+  a timing side-channel on the PC-agent secret specifically.
+- **Oversized request bodies to organiser-agent (>~64KB) are silently
+  truncated and still report success** — confirmed by sending a 200KB
+  body and getting a corrupted 65,333-byte file back with an HTTP 200.
+  This is a silent-data-corruption bug, not just a size-limit gap.
+- **`pc-tunnel@.service` uses `StrictHostKeyChecking=no`** — a low-severity
+  LAN MITM exposure.
+- ~~`file_transfer` has two silent-fallback footguns~~ — **fixed** in
+  commit `7dc1695`: an empty PC/codespace name now raises a clear error
+  at parse time instead of silently resolving to `"default"`, and
+  `_get_token` (used by every tool with an `account=` parameter, not
+  just `file_transfer`) now rejects any string outside
+  `{auto, primary, secondary, tertiary}` instead of silently treating it
+  the same as `"auto"`.
+- **`file_transfer`'s read side has no upfront size cap** — the write
+  side enforces the 15 MB limit documented above, but an oversized
+  *source* is fully read and base64-decoded before being rejected,
+  rather than being rejected up front.
+
+Also worth knowing, as reassurance rather than a limitation: security-qa
+independently **verified** (not just re-asserted) this doc's claim that
+a binary file with a PC as either end of `file_transfer` fails cleanly
+rather than corrupting — they traced the actual mechanism (organiser-agent's
+raw binary response is invalid UTF-8, which the Linux-server hop's strict
+decode step catches and turns into a clean error before it ever reaches
+`server.py`). They also ran full adversarial fuzzing against the real MCP
+JSON-RPC wire protocol (malformed envelopes, wrong-type tool arguments,
+oversized/null-byte/unicode input) with no crashes or leaked internals,
+and confirmed a leaked session ID alone doesn't bypass the bearer-token
+check. One usability-only finding from that pass: the DNS-rebinding
+`allowed_hosts` check has no port wildcard, so a Host header with a port
+gets rejected even with the correct password — breaks routine local
+testing (fails closed, not a security bug, but worth knowing if `/mcp`
+seems to reject valid local requests).
+
+## Pending: agent/pc-agent's fixes (landed on their branch, not yet merged to main)
+
+`agent/pc-agent` has pushed 4 commits addressing several of the gaps
+above, tested against a compiled Linux build (see
+`coordination/status/pc-agent.md` on that branch for full test detail —
+33 new tests, one explicit `expectedFailure` for a POSIX-vs-Windows
+path-semantics artifact that can only be confirmed on real Windows).
+**None of this is on `main` yet** — everything below is what will
+change once it's merged, not current behavior:
+
+- **Machine identity**: `/status` on both agent builds now returns a
+  persistent `machine_id`/`machine_name`, addressing "No PC
+  identity/registration handshake" above. `server.py`'s `PCS` registry
+  remains the source of truth for hub-side routing — this doesn't
+  replace it, it just lets the agent know its own name too.
+- **Binary-safe file transfer endpoints**: a new `/read_file_b64` (GET)
+  and a `content_b64` field on `/write_file` (POST), verified
+  byte-identical round-trip in testing. **This does not yet fix
+  `file_transfer`'s PC-side text-only limitation on its own** — that
+  wiring lives in `server.py` (calling these new endpoints instead of
+  `/preview`/`/write_file`'s old text-only form), which is outside both
+  pc-agent's and this docs pass's scope. Until someone wires it,
+  `file_transfer` still can't move binary data to/from a PC even after
+  this merges.
+- **A local `/config` + `/admin` dashboard on the agent itself**,
+  letting `machine_name`/`secret` be set without hand-editing env vars
+  or the Scheduled Task — hot-reloads without a restart. An
+  environment-variable secret still wins over a config-file one if both
+  are present.
+- **`organiser-agent.py` now has the same protected-path guard
+  `organiser-agent.cpp` already had** — the "legacy build has no path
+  protection" gap in the comparison table above no longer applies once
+  this merges (it remains true of the version on `main` today).
+- **A real, verified bug fix**: `organiser-agent.cpp`'s `/run_command`
+  had no timeout at all (`popen()` blocks until the child exits,
+  indefinitely) — confirmed by actually hanging a `sleep 90` against a
+  60s deadline and watching the process group get killed via `ps aux`.
+  Fixed for the POSIX path; the equivalent Windows fix (Job Objects) is
+  code-reviewed but **not compiled or run** — no Windows toolchain was
+  available to verify it.
+- On the "PC secret pairing isn't enforced" point above: pc-agent looked
+  into this specifically and concluded there's no *architectural*
+  ambiguity to resolve (one agent process is one physical machine with
+  exactly one secret, so there's no "which PC's secret" question for the
+  agent side to answer) — worth knowing as context, though it doesn't
+  change the operational fact that nothing double-checks the two sides
+  were typed identically when you provision a PC.
 
 ## Where things live (quick map)
 
@@ -204,5 +318,6 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
 | `Dockerfile`, `start.sh` | Container build/entrypoint for server.py |
 | `fly.toml` | Fly.io config (see "Deployment target" above) |
 | `.secrets.example` | Full list of every optional/required env var, for local runs |
-| `tests/` | `test_admin_cookie_auth.py` (plain script), `test_file_transfer.py` (pytest, uses fixtures — run with `pytest`, not `python <file>`) |
+| `tests/` | 7 files, 77 tests, run with `pytest tests/` (needs `requirements-test.txt` + `pytest.ini`'s `asyncio_mode = auto` — see below) |
+| `pytest.ini`, `requirements-test.txt` | Test-only deps + the asyncio-mode config every `@pytest.mark.asyncio` test needs — without both, several tests fail with a misleading error instead of a clean pass |
 | `coordination/` | Multi-agent build coordination — not part of the shipped product |

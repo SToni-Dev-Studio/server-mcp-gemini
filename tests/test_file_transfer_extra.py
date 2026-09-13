@@ -171,18 +171,27 @@ def test_pc_binary_read_fails_cleanly_not_corrupted(monkeypatch):
     assert "invalid start byte" in result or "decode" in result.lower()
 
 
-def test_pc_binary_write_fails_cleanly_not_corrupted(monkeypatch, tmp_path):
-    """Writing binary data TO a pc: destination: server.py itself checks
-    (before ever calling organiser-agent) whether the payload can be
-    UTF-8 decoded, and raises a clean error if not -- this half of the
-    safety net lives entirely in server.py, not organiser-agent."""
+def test_pc_binary_write_now_succeeds_via_base64(monkeypatch, tmp_path):
+    """UPDATED (was: rejected binary writes to a pc: destination as a
+    UTF-8-decode failure). agent/pc-agent added content_b64 support to
+    organiser-agent's /write_file (broadcast [0006]), and the lead wired
+    file_transfer's pc: leg to send content_b64 unconditionally instead
+    of trying content= as UTF-8 text first -- binary writes to a PC now
+    succeed instead of being rejected."""
+    received = {}
+
     async def fake_org_post(path, body, pc="default"):
-        pytest.fail("should never reach the PC -- must fail before the network call")
+        received["path"] = path
+        received["body"] = body
+        return {"message": "ok"}
 
     monkeypatch.setattr(srv, "_org_post", fake_org_post)
     binary_data = bytes(range(256)) * 4
     result = asyncio.run(_write_helper(srv, binary_data))
-    assert "text-only" in result.lower() or "binary" in result.lower()
+    assert "pc:default" in result
+    assert received["path"] == "/write_file"
+    assert "content_b64" in received["body"]
+    assert "content" not in received["body"]
 
 
 async def _write_helper(srv, data):

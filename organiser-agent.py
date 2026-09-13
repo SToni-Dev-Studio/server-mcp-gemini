@@ -24,12 +24,25 @@ Usage
        set ORGANISER_SECRET=mysecret   (Windows)
        export ORGANISER_SECRET=mysecret (Mac/Linux)
    Then also set ORGANISER_SECRET to the same value in Render env vars.
+
+6. (Multi-PC) give this machine a name that matches its entry in the PCS
+   registry on the hub side (see pc-tunnel@.service), e.g. "desktop" or
+   "laptop":
+       set ORGANISER_MACHINE_NAME=desktop   (Windows)
+       export ORGANISER_MACHINE_NAME=desktop (Mac/Linux)
+   If unset, the agent falls back to the OS hostname. Either way, a
+   stable machine_id (random, generated once) is persisted alongside the
+   agent so the hub can tell "same machine, renamed" apart from "new
+   machine, name reused" across restarts. See machine_registry() below.
 """
 
 import hashlib
+import json
 import os
 import platform
 import shutil
+import socket
+import uuid
 from pathlib import Path
 from datetime import datetime
 
@@ -41,9 +54,12 @@ try:
 except ImportError:
     HAS_TRASH = False
 
-VERSION = "1.0.0"
+VERSION = "1.2.0"
 PORT = int(os.environ.get("ORGANISER_PORT", 7842))
-SECRET = os.environ.get("ORGANISER_SECRET", "").strip()
+# SECRET and MACHINE_NAME are resolved further down, after the machine
+# registry/config-file plumbing they depend on (env var > config file >
+# default). Referencing them at call time inside route handlers is fine
+# even though they're assigned later in this file.
 
 app = Flask(__name__)
 
@@ -57,6 +73,138 @@ def _check_auth():
         return
     if request.headers.get("X-Organiser-Secret", "") != SECRET:
         abort(401, "Unauthorized")
+
+
+# ---------------------------------------------------------------------------
+# Machine registry
+# ---------------------------------------------------------------------------
+# Each deployed agent is one machine in a small multi-PC fleet (desktop,
+# laptop, server, ...). The hub side (pc-tunnel@.service / the PCS env var
+# on Render) already keys machines by a short name and gives each one its
+# own port + secret. We mirror that here with two identifiers:
+#
+#   machine_name — human-chosen, matches the hub's PCS key (e.g. "desktop").
+#                  Comes from ORGANISER_MACHINE_NAME if set, else the OS
+#                  hostname. Not guaranteed unique or stable (a hostname
+#                  can be reused, a name can be typo'd or changed).
+#   machine_id   — a random id generated once on first run and persisted
+#                  to a small config file next to this script (or in the
+#                  user's config dir). This is what actually distinguishes
+#                  "the same physical agent, renamed" from "a different
+#                  machine that happens to reuse the name" — the hub can
+#                  key long-lived state (e.g. audit logs) off machine_id
+#                  and treat machine_name as a display label that can move.
+#
+# This is deliberately just a file, not a database: one agent per machine,
+# low write frequency, no concurrent-writer story needed.
+
+def _config_dir() -> Path:
+    if platform.system() == "Windows":
+        base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+    else:
+        base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
+    d = Path(base) / "organiser-agent"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _load_or_create_machine_id(config_path: Path) -> str:
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            mid = data.get("machine_id", "")
+            if mid:
+                return mid
+        except (json.JSONDecodeError, OSError):
+            pass  # fall through and regenerate/overwrite a corrupt file
+    mid = str(uuid.uuid4())
+    try:
+        config_path.write_text(json.dumps({"machine_id": mid}), encoding="utf-8")
+    except OSError:
+        pass  # best-effort persistence; agent still works this run
+    return mid
+
+
+_MACHINE_CONFIG_PATH = _config_dir() / "machine.json"
+MACHINE_ID = _load_or_create_machine_id(_MACHINE_CONFIG_PATH)
+
+
+def _load_config() -> dict:
+    if _MACHINE_CONFIG_PATH.exists():
+        try:
+            return json.loads(_MACHINE_CONFIG_PATH.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            return {}
+    return {}
+
+
+def _save_config(updates: dict) -> None:
+    data = _load_config()
+    data.update(updates)
+    _MACHINE_CONFIG_PATH.write_text(json.dumps(data), encoding="utf-8")
+
+
+_config = _load_config()
+# Precedence: env var (set at service-install time) wins over the config
+# file (set later via /admin) wins over the OS hostname. This lets someone
+# either pin the name at install time OR change it later from the local
+# dashboard without needing to touch environment variables/services.
+MACHINE_NAME = (
+    os.environ.get("ORGANISER_MACHINE_NAME", "").strip()
+    or _config.get("machine_name", "").strip()
+    or socket.gethostname()
+)
+# Same precedence for the secret: env var wins (so a service-managed
+# deployment isn't silently overridable from the local HTTP dashboard),
+# else whatever was last saved via /admin.
+SECRET = os.environ.get("ORGANISER_SECRET", "").strip() or _config.get("secret", "").strip()
+
+
+# ---------------------------------------------------------------------------
+# Protected paths
+# ---------------------------------------------------------------------------
+# The Windows system directory (C:\Windows) must never be movable,
+# deletable, or writable through this agent, regardless of what a caller
+# asks for — see coordination/tasks/pc-agent.md. This mirrors the check in
+# organiser-agent.cpp so the Python and C++ builds agree on what "protected"
+# means.
+#
+# NOTE: like the C++ build, this guard covers path-based file operations
+# only (list/move/delete/preview/disk_usage/duplicates/write_file). It does
+# NOT and cannot reliably cover /run_command — arbitrary shell text can't be
+# statically checked for whether it touches a protected path. Closing that
+# off requires OS-level permissions (run the agent as a user without write
+# access to C:\Windows), not a string check here.
+
+def _windows_dir() -> Path:
+    root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    return Path(root)
+
+
+def _is_protected_path(raw: Path) -> bool:
+    if platform.system() != "Windows":
+        return False  # this guard only applies to the Windows deployment target
+    try:
+        resolved = raw.expanduser().resolve(strict=False)
+    except (OSError, RuntimeError):
+        resolved = raw.expanduser().absolute()
+    win = _windows_dir().resolve(strict=False)
+    r = str(resolved).lower()
+    w = str(win).lower()
+    if len(r) < len(w) or not r.startswith(w):
+        return False
+    # boundary check so "C:\Windows2\..." doesn't false-match "C:\Windows"
+    return len(r) == len(w) or r[len(w)] in ("\\", "/")
+
+
+def _reject_if_protected(*paths: Path):
+    """Returns a Flask error response if any path is protected, else None."""
+    for p in paths:
+        if _is_protected_path(p):
+            return jsonify({
+                "error": f"Path is inside the protected Windows system directory: {p}"
+            }), 403
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +247,8 @@ def status():
         "python": platform.python_version(),
         "trash_available": HAS_TRASH,
         "watched_folders": [],
+        "machine_id": MACHINE_ID,
+        "machine_name": MACHINE_NAME,
     })
 
 
@@ -109,6 +259,9 @@ def list_files():
     recursive = request.args.get("recursive", "false").lower() == "true"
 
     p = Path(folder).expanduser()
+    blocked = _reject_if_protected(p)
+    if blocked:
+        return blocked
     if not p.exists():
         return jsonify({"error": f"Path does not exist: {folder}"}), 404
     if not p.is_dir():
@@ -129,6 +282,9 @@ def move_file():
     src = Path(body.get("source", "")).expanduser()
     dst = Path(body.get("destination", "")).expanduser()
 
+    blocked = _reject_if_protected(src, dst)
+    if blocked:
+        return blocked
     if not src.exists():
         return jsonify({"error": f"Source does not exist: {src}"}), 404
 
@@ -144,6 +300,9 @@ def delete_file():
     path = Path(body.get("path", "")).expanduser()
     permanent = body.get("permanent", False)
 
+    blocked = _reject_if_protected(path)
+    if blocked:
+        return blocked
     if not path.exists():
         return jsonify({"error": f"Path does not exist: {path}"}), 404
 
@@ -168,6 +327,9 @@ def preview_file():
     path = Path(request.args.get("path", "")).expanduser()
     max_bytes = int(request.args.get("max_bytes", 4096))
 
+    blocked = _reject_if_protected(path)
+    if blocked:
+        return blocked
     if not path.exists():
         return jsonify({"error": f"Path does not exist: {path}"}), 404
     if not path.is_file():
@@ -186,6 +348,9 @@ def disk_usage():
     _check_auth()
     folder = Path(request.args.get("folder", "")).expanduser()
 
+    blocked = _reject_if_protected(folder)
+    if blocked:
+        return blocked
     if not folder.exists():
         return jsonify({"error": f"Path does not exist: {folder}"}), 404
 
@@ -215,19 +380,31 @@ def disk_usage():
 @app.post("/run_command")
 def run_command():
     _check_auth()
-    import subprocess, sys
+    import subprocess
     body = request.get_json(force=True)
     command = body.get("command", "")
     working_dir = body.get("working_dir", None) or None
+    timeout_s = 60
 
     if not command:
         return jsonify({"error": "No command provided"}), 400
 
-    # Determine shell based on OS
+    # Determine shell based on OS. This endpoint is, by design, "run
+    # arbitrary shell text" — there is no safe argv-list form for it
+    # because the caller supplies a full command line, not a single
+    # program + args. Treat this endpoint itself, not string-parsing, as
+    # the risk boundary: lock it down with ORGANISER_SECRET, and run the
+    # agent under an OS account with the least privilege you can manage
+    # (see protected-path notes above — the same "can't parse arbitrary
+    # shell text" limit applies here as it does to /run_command escaping
+    # the path guard).
     if platform.system() == "Windows":
         shell_args = ["cmd", "/c", command]
     else:
         shell_args = ["/bin/bash", "-c", command]
+
+    if working_dir is not None and not os.path.isdir(working_dir):
+        return jsonify({"error": f"working_dir does not exist or is not a directory: {working_dir}"}), 400
 
     try:
         result = subprocess.run(
@@ -235,7 +412,7 @@ def run_command():
             cwd=working_dir,
             capture_output=True,
             text=True,
-            timeout=60,
+            timeout=timeout_s,
         )
         return jsonify({
             "returncode": result.returncode,
@@ -243,7 +420,9 @@ def run_command():
             "stderr": result.stderr[-2000:],
         })
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "Command timed out after 60s"}), 408
+        return jsonify({"error": f"Command timed out after {timeout_s}s"}), 408
+    except FileNotFoundError as e:
+        return jsonify({"error": f"Shell not found: {e}"}), 500
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -253,6 +432,9 @@ def find_duplicates():
     _check_auth()
     folder = Path(request.args.get("folder", "")).expanduser()
 
+    blocked = _reject_if_protected(folder)
+    if blocked:
+        return blocked
     if not folder.exists():
         return jsonify({"error": f"Path does not exist: {folder}"}), 404
 
@@ -268,7 +450,7 @@ def find_duplicates():
             continue
 
     groups = []
-    for files in hash_map.values():
+    for h, files in hash_map.items():
         if len(files) < 2:
             continue
         size = files[0].stat().st_size
@@ -297,6 +479,10 @@ def screenshot():
     import base64, io
     body = request.get_json(force=True) or {}
     save_path = body.get("save_path", "")
+    if save_path:
+        blocked = _reject_if_protected(Path(save_path).expanduser())
+        if blocked:
+            return blocked
     try:
         import PIL.ImageGrab as _ig
         img = _ig.grab()
@@ -318,6 +504,10 @@ def screenshot():
                 })
         except ImportError:
             return jsonify({"error": "No screenshot library found. Run: pip install Pillow or pip install mss"}), 500
+        except Exception as e:
+            return jsonify({"error": f"Screenshot capture failed: {e}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Screenshot capture failed: {e}"}), 500
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
@@ -336,22 +526,201 @@ def screenshot():
 
 @app.post("/write_file")
 def write_file():
+    # Accepts either "content" (text, existing behaviour) or "content_b64"
+    # (base64-encoded bytes, new) so binary files survive a round trip.
+    # file_transfer's pc: leg previously used this endpoint text-only,
+    # which silently corrupts binary files sent as text (encoding
+    # mismatches, e.g. writing bytes that aren't valid UTF-8 crashes
+    # instead of writing them) — content_b64 is the fix for that. See
+    # coordination/status/pc-agent.md and BROADCAST [0006].
     _check_auth()
+    import base64
     body = request.get_json(force=True)
     path = Path(body.get("path", "")).expanduser()
-    content = body.get("content", "")
-    if not path:
+    if not path or str(path) in (".", ""):
         return jsonify({"error": "No path provided"}), 400
+    blocked = _reject_if_protected(path)
+    if blocked:
+        return blocked
+
+    content_b64 = body.get("content_b64")
+    if content_b64 is not None:
+        try:
+            raw = base64.b64decode(content_b64, validate=True)
+        except Exception as e:
+            return jsonify({"error": f"Invalid base64 in content_b64: {e}"}), 400
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(raw)
+        return jsonify({"message": f"Written to '{path}' ({len(raw)} bytes, binary)"})
+
+    content = body.get("content", "")
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
     return jsonify({"message": f"Written to '{path}' ({len(content)} bytes)"})
 
 
+@app.get("/read_file_b64")
+def read_file_b64():
+    # Binary-safe counterpart to /preview (which is text/UTF-8 only).
+    # Returns the raw bytes of any file, base64-encoded, so file_transfer
+    # can move binaries to/from a PC without corruption.
+    _check_auth()
+    import base64
+    path = Path(request.args.get("path", "")).expanduser()
+    max_bytes = int(request.args.get("max_bytes", 10 * 1024 * 1024))  # 10MB default cap
+
+    blocked = _reject_if_protected(path)
+    if blocked:
+        return blocked
+    if not path.exists():
+        return jsonify({"error": f"Path does not exist: {path}"}), 404
+    if not path.is_file():
+        return jsonify({"error": "Not a file"}), 400
+
+    try:
+        size = path.stat().st_size
+        with open(path, "rb") as f:
+            raw = f.read(max_bytes)
+        truncated = size > len(raw)
+        return jsonify({
+            "path": str(path),
+            "content_b64": base64.b64encode(raw).decode("ascii"),
+            "size_bytes": size,
+            "returned_bytes": len(raw),
+            "truncated": truncated,
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Local config / admin dashboard
+# ---------------------------------------------------------------------------
+# Per BROADCAST [0006]: config (secret, machine name) should be manageable
+# from a local UI built into the agent, not by hand-editing a file over
+# SSH/RDP. This is intentionally minimal — a same-machine-only HTML form
+# backed by /config — not a general remote-admin panel. It relies on the
+# same loopback binding as every other endpoint here for its access
+# control; it does NOT bypass or replace ORGANISER_SECRET for the other
+# routes (setting or changing the secret still requires already being able
+# to reach this port, exactly like every other endpoint).
+
+@app.get("/config")
+def get_config():
+    _check_auth()
+    return jsonify({
+        "machine_id": MACHINE_ID,
+        "machine_name": MACHINE_NAME,
+        "secret_set": bool(SECRET),
+        "secret_source": "env" if os.environ.get("ORGANISER_SECRET", "").strip() else (
+            "config_file" if SECRET else "none"
+        ),
+        "config_path": str(_MACHINE_CONFIG_PATH),
+    })
+
+
+@app.post("/config")
+def update_config():
+    global MACHINE_NAME, SECRET
+    _check_auth()
+    body = request.get_json(force=True) or {}
+    updates = {}
+
+    if "machine_name" in body:
+        name = str(body["machine_name"]).strip()
+        if not name:
+            return jsonify({"error": "machine_name cannot be empty"}), 400
+        updates["machine_name"] = name
+
+    if "secret" in body:
+        # Empty string is allowed here — it means "remove the secret",
+        # matching the existing semantics of ORGANISER_SECRET unset.
+        updates["secret"] = str(body["secret"])
+
+    if not updates:
+        return jsonify({"error": "Nothing to update. Send machine_name and/or secret."}), 400
+
+    _save_config(updates)
+
+    # Hot-reload in-memory values so the change takes effect immediately,
+    # without restarting the agent — UNLESS an env var is set for that
+    # field, in which case the env var still wins (documented precedence).
+    if "machine_name" in updates and not os.environ.get("ORGANISER_MACHINE_NAME", "").strip():
+        MACHINE_NAME = updates["machine_name"]
+    if "secret" in updates and not os.environ.get("ORGANISER_SECRET", "").strip():
+        SECRET = updates["secret"]
+
+    return jsonify({"message": "Config updated", "machine_name": MACHINE_NAME, "secret_set": bool(SECRET)})
+
+
+@app.get("/admin")
+def admin_page():
+    # No _check_auth() here on purpose: if a secret is already set, you
+    # need it to see the *current* config via /config anyway (the page's
+    # own JS calls /config and /run_command-style endpoints, which check
+    # auth same as ever) — the static form shell itself has nothing
+    # secret in it. This mirrors how the other endpoints are protected:
+    # loopback bind + optional secret header, not per-page gating of a
+    # write-nothing-here shell page.
+    html = """<!DOCTYPE html>
+<html><head><title>Organiser Agent — Local Config</title>
+<style>
+body { font-family: system-ui, sans-serif; max-width: 480px; margin: 40px auto; }
+label { display: block; margin-top: 12px; font-weight: 600; }
+input { width: 100%; padding: 6px; box-sizing: border-box; }
+button { margin-top: 16px; padding: 8px 16px; }
+#status { margin-top: 12px; white-space: pre-wrap; font-family: monospace; font-size: 0.85em; }
+</style></head>
+<body>
+<h2>Organiser Agent — Local Config</h2>
+<p>Changes here are saved to this PC's local config file and take effect immediately.</p>
+<label>Secret (header X-Organiser-Secret required if set)
+  <input id="authSecret" type="password" placeholder="current secret, if any (to authenticate this page's requests)">
+</label>
+<hr>
+<label>Machine name <input id="machineName" type="text"></label>
+<label>New secret (leave blank to remove) <input id="newSecret" type="password"></label>
+<button onclick="loadConfig()">Refresh current config</button>
+<button onclick="saveConfig()">Save</button>
+<div id="status"></div>
+<script>
+async function call(path, opts) {
+  opts = opts || {};
+  opts.headers = Object.assign({'Content-Type': 'application/json'}, opts.headers || {});
+  var s = document.getElementById('authSecret').value;
+  if (s) opts.headers['X-Organiser-Secret'] = s;
+  const r = await fetch(path, opts);
+  const j = await r.json().catch(() => ({}));
+  return {ok: r.ok, status: r.status, body: j};
+}
+async function loadConfig() {
+  const res = await call('/config');
+  document.getElementById('status').textContent = JSON.stringify(res.body, null, 2);
+  if (res.ok) document.getElementById('machineName').value = res.body.machine_name || '';
+}
+async function saveConfig() {
+  const updates = {};
+  const mn = document.getElementById('machineName').value.trim();
+  if (mn) updates.machine_name = mn;
+  const ns = document.getElementById('newSecret');
+  if (ns.value !== '') updates.secret = ns.value;
+  const res = await call('/config', {method: 'POST', body: JSON.stringify(updates)});
+  document.getElementById('status').textContent = JSON.stringify(res.body, null, 2);
+  ns.value = '';
+}
+loadConfig();
+</script>
+</body></html>"""
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print(f"  Organiser Agent v{VERSION}")
     print(f"  Platform : {platform.system()} {platform.release()}")
+    print(f"  Machine  : {MACHINE_NAME} ({MACHINE_ID})")
     print(f"  Trash    : {'✅ send2trash available' if HAS_TRASH else '⚠️  install send2trash for safe deletes'}")
     print(f"  Auth     : {'🔒 secret set' if SECRET else '⚠️  no secret — anyone with the URL can access'}")
     print(f"  Listening: http://localhost:{PORT}")

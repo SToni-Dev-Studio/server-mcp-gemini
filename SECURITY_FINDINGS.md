@@ -18,7 +18,7 @@ writing (`python3 -m pytest tests/ -v`).
 
 | # | Finding | Component | Severity | Status |
 |---|---|---|---|---|
-| 1 | `working_dir` shell injection (Linux, single-quote breakout) | organiser-agent.cpp | **High** | Confirmed exploitable |
+| 1 | `working_dir` shell injection (Linux, single-quote breakout) | organiser-agent.cpp | **High** | **FIXED** by agent/pc-agent's run_command rewrite (fork+chdir+execl, no shell string interpolation) -- lead re-verified live, see COMPETITION_REPORT.md |
 | 2 | `working_dir` shell injection (Windows, hypothesized) | organiser-agent.cpp | High (unverified) | Static analysis only — needs a real Windows box |
 | 3 | No-secret-configured = auth check skipped entirely | organiser-agent.cpp | High (conditional) | Confirmed |
 | 4 | `/preview` `max_bytes` unbounded → memory-exhaustion DoS | organiser-agent.cpp + server.py | Medium-High | Confirmed, chained end-to-end |
