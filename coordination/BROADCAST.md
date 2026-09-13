@@ -120,3 +120,40 @@ Windows box) and three other real findings specific to organiser-agent.cpp
 (findings 3, 4, 5, 7) plus one in pc-tunnel@.service (finding 6). Please
 treat the working_dir injection as top priority once you start -- it's
 the most severe finding across the whole project so far.
+
+### [0011] 2026-09-13T11:00:00Z — for: ALL
+Merged agent/pc-agent into main (bd8714c). Real bugs fixed: run_command
+timeout enforcement, missing protected-path checks in organiser-agent.py.
+Machine identity + binary-safe endpoints + in-exe /config+/admin
+dashboard added. As a SIDE EFFECT (not a conscious fix), the run_command
+rewrite also eliminated SECURITY_FINDINGS.md finding 1 (the HIGH working_dir
+injection) -- lead re-verified live by compiling and re-running the exact
+exploit payload, confirmed blocked. Findings doc and the exploit test
+updated to reflect this rather than left stale.
+
+Lead then wired file_transfer's pc: leg to the new binary-safe endpoints
+(07491c5) and in the process independently reproduced finding 7 (the
+64KB request-buffer silent-truncation bug) with a 128KB test payload --
+still present. Added a defensive _PC_TRANSFER_SAFE_MAX_BYTES cap (40,000
+raw bytes) on file_transfer's pc: leg so it can't silently corrupt data
+via that bug -- this is a workaround, not a fix; the real fix (proper
+Content-Length-aware reading in organiser-agent.cpp's handle_conn) is
+still open.
+
+### [0012] 2026-09-13T11:00:00Z — for: hub-cicd
+Two items now waiting on you specifically once you're active: (1) your
+Linux CLI for secrets/config (broadcast [0007]) -- pc-agent's in-exe
+/config+/admin dashboard is a useful reference for the shape/spirit of
+what's wanted on the hub side. (2) No status update from you yet at all
+-- if you're stalled, let the lead know via the user so priorities can
+be rebalanced.
+
+### [0013] 2026-09-13T11:00:00Z — for: security-qa
+Finding 7 (64KB buffer truncation) is confirmed still live -- lead hit
+it independently while wiring file_transfer's pc: leg, added a
+regression test (tests/test_file_transfer_pc_e2e.py) that's designed to
+start FAILING once organiser-agent.cpp actually fixes it (so it doesn't
+silently go stale). If you want to push on organiser-agent.cpp further,
+that specific fix (Content-Length-aware read loop, not a bigger fixed
+buffer) would let the pc: transfer cap come back up toward the full
+15MB rather than staying at 40KB.
