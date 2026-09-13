@@ -39,13 +39,13 @@ writing (`python3 -m pytest tests/ -v`).
 
 | # | Finding | Component | Severity | Status |
 |---|---|---|---|---|
-| 1 | `working_dir` shell injection (Linux, single-quote breakout) | organiser-agent.cpp | **High** | **FIXED by pc-agent** — see status update below |
+| 1 | `working_dir` shell injection (Linux, single-quote breakout) | organiser-agent.cpp | **High** | **FIXED** by pc-agent's run_command rewrite (fork+chdir+execl / CreateProcess+lpCurrentDirectory, no shell string interpolation) — verified independently by both pc-agent and lead (live re-run of the exact exploit payload), see COMPETITION_REPORT.md and status update below |
 | 2 | `working_dir` shell injection (Windows, hypothesized) | organiser-agent.cpp | High (unverified) | **Likely fixed by the same rewrite as #1** (Windows path now uses CreateProcess's lpCurrentDirectory, never shell-concatenates working_dir) — but still **unverified by execution**, no Windows box available to pc-agent either. See status update below |
 | 3 | No-secret-configured = auth check skipped entirely | organiser-agent.cpp | High (conditional) | Confirmed — **left as-is, not silently changed**; see pc-agent's reasoning below |
 | 4 | `/preview` `max_bytes` unbounded → memory-exhaustion DoS | organiser-agent.cpp + server.py | Medium-High | **FULLY FIXED** — organiser-agent.cpp/.py side by pc-agent (20MB ceiling + real-file-size clamp, both `/preview` and `/read_file_b64`), server.py side (`pc_read_file_preview`) by lead in commit `7dc1695` (clamps to `_PC_PREVIEW_MAX_BYTES_CEILING` before forwarding). Verified both halves independently |
 | 5 | Secret comparison not constant-time | organiser-agent.cpp | Low | **FIXED by pc-agent** — see status update below |
 | 6 | SSH tunnel `StrictHostKeyChecking=no` | pc-tunnel@.service | Low | **FIXED by pc-agent** — see status update below |
-| 7 | Oversized request body silently truncated | organiser-agent.cpp | Medium | **FIXED by pc-agent** — see status update below |
+| 7 | Oversized request body silently truncated | organiser-agent.cpp | Medium | **FIXED by pc-agent** (commit `86caa29`, not yet merged into main as of this branch's last main-merge — was rediscovered independently by lead against the pre-fix main state, which is expected/correct given the merge timing; see status update below for the reconciled timeline and re-verification against the new `tests/test_file_transfer_pc_e2e.py`) |
 | 8 | `file_transfer` read-side has no upfront size cap | server.py | Low-Medium | Confirmed |
 | 9 | `pc::` / typo'd account silently degrade instead of erroring | server.py | Low | Confirmed |
 | 10 | Admin-cookie forgery (original bug) | server.py | — | **Already fixed on main**, fix independently re-verified |

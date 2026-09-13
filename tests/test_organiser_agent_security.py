@@ -140,11 +140,24 @@ def test_working_dir_command_injection(agent_binary, tmp_path):
     and coordination/status/pc-agent.md) -- this test originally proved
     the vulnerability by injecting a `touch` via `working_dir` while
     `command` was an inert echo, then asserting the marker file existed.
-    run_command no longer builds a `cd "<working_dir>" && <command>`
-    shell string at all: the POSIX path validates working_dir with
-    fs::is_directory() and then chdir()s a forked child directly before
-    exec; the Windows path passes it as CreateProcess's lpCurrentDirectory
-    parameter. Neither ever treats working_dir as shell text.
+
+    Originally: `working_dir` was embedded into a shell string as
+    `cd "<working_dir>" && <command>`, wrapped in `/bin/bash -c '...'`,
+    with NO escaping of single quotes. A single quote broke out of that
+    wrapper and the remainder of working_dir was interpreted as new
+    shell syntax, independent of `command`.
+
+    Now: run_command no longer builds that string at all. The POSIX path
+    validates working_dir with fs::is_directory() and then chdir()s a
+    forked child directly before exec; the Windows path passes it as
+    CreateProcess's lpCurrentDirectory parameter. Neither ever treats
+    working_dir as shell text.
+
+    Verified independently twice, not just by reading the diff: pc-agent
+    compiled this exact organiser-agent.cpp and re-ran this exact exploit
+    payload by hand against the running binary; lead did the same
+    separately before updating this test (see COMPETITION_REPORT.md for
+    that verification).
 
     Per the original docstring's own instruction ("if this starts
     failing because the bug was fixed, please update SECURITY_FINDINGS.md
@@ -164,12 +177,13 @@ def test_working_dir_command_injection(agent_binary, tmp_path):
         # Fixed behavior: this isn't a real directory, so it's now a
         # clean 400 -- not a 200 that silently ran the injected shell
         # syntax.
-        assert status == 400
+        assert status == 400, f"expected clean 400 rejection, got {status}: {body!r}"
     assert not marker.exists(), (
         "REGRESSION: the working_dir shell-injection is back -- the "
         "marker file was created, meaning working_dir is being "
         "shell-interpreted again instead of passed as a real chdir "
-        "target/lpCurrentDirectory."
+        "target/lpCurrentDirectory. This is a HIGH-severity finding if "
+        "it starts failing again; see SECURITY_FINDINGS.md finding 1."
     )
 
 
