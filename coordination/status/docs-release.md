@@ -1,96 +1,68 @@
 # Status: docs-release
-Updated: 2026-09-11T20:20:00Z
+Updated: 2026-09-13T10:10:00Z
 Branch: agent/docs-release
 State: IN_PROGRESS
-Last broadcast read: 0003
 
 ## Summary
-Cloned into own checkout (~/docs-release-work), merged origin/main
-(picked up BROADCAST.md + task corrections), read coordination/README.md
-and my task brief. pc-agent and hub-cicd branches have zero commits
-beyond main so far — nothing to cross-check yet; will re-pull before
-finalizing docs.
+All 5 deliverables have a first landed version (9 commits pushed so
+far). Re-pulled origin/main at the start of this session per the
+"merge main every resume" protocol fix (commit 295bb45 on main) --
+main is unchanged since my last merge, so no new doc corrections
+needed from that side. agent/security-qa now has real commits (2) with
+findings relevant to my "Known limitations" section -- see below.
+agent/pc-agent and agent/hub-cicd still have zero commits beyond main.
 
-Read in full: server.py, organiser-agent.py, organiser-agent.cpp,
-README.md, BUILD_AND_SETUP.md, SKILL.md, fly.toml, Dockerfile, start.sh,
-pc-tunnel@.service, requirements.txt, .gitignore, .secrets.example,
-.github/workflows/build-organiser-agent.yml, tests/test_admin_cookie_auth.py.
-
-## Findings so far (cross-checked against actual code)
-- README.md is badly stale: describes a 4-tool, per-request-header-auth,
-  pre-PC/pre-admin-dashboard version of the server. Needs a full rewrite.
-- BUILD_AND_SETUP.md and SKILL.md are already largely accurate against
-  current server.py (PCS registry, admin dashboard, diagnostics, multi-PC
-  tunnel setup all match). Mainly need polish + an ARCHITECTURE.md split
-  + a "known limitations" section, not a rewrite.
-- organiser-agent.py (legacy Flask reference, v1.0.0) has NO
-  path-traversal/protected-path checks and its own docstring describes
-  an obsolete ngrok+ORGANISER_URL deployment model. organiser-agent.cpp
-  (v2.0.0-cpp, the one actually referenced as "the" agent everywhere else)
-  already has a protected-path guard for Windows system dirs on every
-  file-touching endpoint except /run_command (documented as deliberate:
-  can't safely string-parse arbitrary shell text). Docs will state the
-  C++ build is the supported agent and flag the Python file as a stale
-  reference implementation, not touch either file's code.
-- No PC identity/name concept in either agent build yet (matches
-  pc-agent.md's brief — that's their branch's job, not landing yet).
-  Per-PC secret separation already works operationally today (each PCS
-  entry's `secret` must match that PC's own ORGANISER_SECRET) but nothing
-  enforces the pairing — will note as a docs/installer point.
-- fly.toml + Dockerfile exist but Render is what's actually documented/
-  wired up everywhere else (RENDER_API_KEY, hardcoded RENDER_SERVICE_ID
-  default, /admin dashboard is Render-API-specific). Fly looks vestigial
-  but I'm not marking it dead in docs until agent/hub-cicd confirms —
-  will re-check their status file before finalizing.
-- Only CI today: build-organiser-agent.yml (plain build + rolling
-  "latest" release of the .exe). No tagged/versioned release workflow,
-  no packaging of server.py/docs, no test/lint step (that gap is
-  hub-cicd's, not mine — noting only for release-workflow design).
-- .secrets.example only documents GITHUB_TOKEN/MCP_ALLOWED_HOST/PORT —
-  well short of the real config surface (SECONDARY/TERTIARY tokens,
-  MCP_SERVER_PASSWORD, ADMIN_PASSWORD, PCS, PLEX_*, SERVER_*,
-  TAILSCALE_AUTH_KEY, SSH_PRIVATE_KEY). Planning to bring it in line —
-  it's a docs/onboarding file, not server code.
-- Tooling note (not mine to fix, server.py out of scope): the
-  `write_codespace_file` MCP tool always reports "Successfully wrote..."
-  even when the underlying write fails, because it doesn't `mkdir -p`
-  the parent directory and doesn't check the exec result before
-  returning. Hit this firsthand writing this very file. Flagging here
-  in case it's useful to whoever owns server.py — not fixing it myself.
-
-## Plan
-1. Bring .secrets.example up to date with real config surface.
-2. Write ARCHITECTURE.md (split out of BUILD_AND_SETUP's diagram + tool
-   inventory).
-3. Rewrite README.md to match reality, linking out to ARCHITECTURE.md /
-   BUILD_AND_SETUP.md.
-4. Light-touch BUILD_AND_SETUP.md: cross-links, "Known limitations",
-   the .py-vs-.cpp agent note, Fly/Render flag.
-5. Tag-triggered release workflow (build + test + package + publish to
-   GitHub Releases with version info).
-6. Windows installer script: detect arch, fetch matching release asset,
-   verify checksum, install, preserve existing config on upgrade, verify
-   it runs post-install. Hold off on a Linux hub installer until
-   agent/hub-cicd's tunnel design lands (brief says only build one "if
-   needed").
-7. Re-pull agent/pc-agent + agent/hub-cicd branches and their status
-   files before calling docs "final" — cross-check every claim once
-   their real changes exist.
-
-## Files changed
-(none committed yet as of this update — first commit landing next)
+## Files changed (on agent/docs-release, cumulative)
+- README.md (full rewrite)
+- ARCHITECTURE.md (new)
+- BUILD_AND_SETUP.md (cross-links, installer section, private-repo fix)
+- SKILL.md (Plex section removed, file_transfer section replacing the
+  5 old transfer__* tools, tool-count fix)
+- .secrets.example (full rewrite to match real config surface, Plex
+  vars removed)
+- .github/workflows/release.yml (new)
+- scripts/install-organiser-agent.ps1 (new)
+- coordination/status/docs-release.md (this file)
 
 ## Tests run (command -> result)
-(none yet)
+- python tests/test_admin_cookie_auth.py -> both PASS lines printed, no assertion errors
+- pytest tests/ -v -> 8 passed, 0 failed (all from test_file_transfer.py)
+- python -c "import ast; ast.parse(open('server.py').read())" -> parses cleanly
+- python3 -c "import yaml; yaml.safe_load(open('.github/workflows/release.yml'))" -> valid YAML
+- PowerShell parser check ([...Parser]::ParseFile) on install-organiser-agent.ps1 -> no syntax errors
+- grep -rniI 'plex|transfer__' across every doc I touched -> only intentional
+  "this was removed" notices and unrelated pipeline paths remain (see below)
 
 ## Findings / security notes
-See "Findings so far" above. No code in server.py / organiser-agent.* /
-hub-tunnel files touched or will be touched — out of scope per brief.
+- organiser-agent.py (legacy) has no path-traversal/protected-path
+  checks; organiser-agent.cpp (deployed) does, except deliberately not
+  on /run_command. Documented in ARCHITECTURE.md, not touched.
+- file_transfer's pc: leg is text-only (organiser-agent's /preview and
+  /write_file aren't base64-safe yet) -- binary PC transfers fail
+  cleanly, don't corrupt. Documented; tracked as pc-agent's work per
+  BROADCAST 0006.
+- PC secret pairing (PCS registry entry vs that PC's own
+  ORGANISER_SECRET) is manual and unenforced on both sides. Documented.
+- NEW -- agent/security-qa has landed findings I should fold into
+  ARCHITECTURE.md's "Known limitations" once I've read their status
+  file/diff in full: a shell-injection issue via `working_dir` in
+  organiser-agent, an unbounded `max_bytes` DoS reachable through
+  server.py, and oversized-body truncation behavior. Their commit
+  message also says they *verified* my "PC binary transfer fails
+  cleanly" claim independently -- good, that's corroborated, not just
+  asserted by me. Not yet reflected in my docs -- next step.
+- Two tooling bugs found in server.py's own Codespaces tools (not
+  fixed, out of scope, documented instead): write_codespace_file
+  doesn't mkdir -p the target's parent dir or check the write
+  succeeded before reporting success; create_git_commit_and_push uses
+  git add -u, which only stages already-tracked files.
+- Fly vs Render: still treating Render as the confirmed/documented
+  target and Fly as present-but-unconfirmed, pending hub-cicd.
 
 ## Blockers / questions for lead
-- agent/pc-agent and agent/hub-cicd have no commits yet — proceeding
-  with docs for the current baseline; will revise once their work lands
-  rather than block on it.
-- Fly vs Render: treating Render as primary/documented and Fly as
-  present-but-unconfirmed in the docs I write, pending hub-cicd's
-  findings. Flag if that's wrong.
+- agent/pc-agent and agent/hub-cicd still have zero commits beyond
+  main. agent/security-qa now has 2 real commits with findings that
+  overlap my "Known limitations" section (see above) -- I have not yet
+  read their branch's diff/status file in full, that's my immediate
+  next step, not a blocker.
+- Nothing currently blocking my own progress.
