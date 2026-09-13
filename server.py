@@ -228,8 +228,22 @@ def _q(value) -> str:
 # Token Resolution & Fallback Helpers
 # ---------------------------------------------------------------------------
 
+_VALID_ACCOUNTS = {"auto", "primary", "secondary", "tertiary"}
+
+
 def _get_token(account: str = "auto") -> tuple[str, str]:
     """Returns (token, account_name) — supports primary, secondary, tertiary."""
+    # A typo'd/unrecognized account string used to fall through silently
+    # to the same behavior as "auto" (security-qa finding 9) -- a caller
+    # who named one specific account and mistyped it got silently
+    # redirected to a different configured account instead of an error.
+    # Not a privilege-escalation issue (still only picks from already-
+    # configured tokens) but a real correctness/surprise gap.
+    if account not in _VALID_ACCOUNTS:
+        raise ValueError(
+            f"Unknown account '{account}' -- expected one of {sorted(_VALID_ACCOUNTS)}"
+        )
+
     primary = os.environ.get("GITHUB_TOKEN", "").strip()
     secondary = os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()
     tertiary = os.environ.get("GITHUB_TOKEN_TERTIARY", "").strip()
@@ -472,8 +486,16 @@ async def read_codespace_file(codespace_name: str, file_path: str, account: str 
 async def write_codespace_file(codespace_name: str, file_path: str, content: str, account: str = "auto") -> str:
     """Safely write/overwrite content to a file in the codespace using base64 encoding."""
     b64_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
-    cmd = f"echo {_q(b64_content)} | base64 -d > {_q(file_path)}"
-    await exec_command(codespace_name, cmd, timeout_seconds=15, account=account)
+    # mkdir -p the parent dir (a write to a not-yet-existing subdirectory
+    # used to fail silently) and check for an explicit success marker
+    # instead of unconditionally reporting success regardless of outcome
+    # (found by agent/docs-release while writing docs against real
+    # behavior -- this tool previously always said "Successfully wrote..."
+    # even when the write failed).
+    cmd = f"mkdir -p $(dirname {_q(file_path)}) && echo {_q(b64_content)} | base64 -d > {_q(file_path)} && echo __WRITE_OK__"
+    result = await exec_command(codespace_name, cmd, timeout_seconds=15, account=account)
+    if "__WRITE_OK__" not in result:
+        return f"Write failed for '{file_path}': {result}"
     return f"Successfully wrote {len(content)} characters to '{file_path}'."
 
 
@@ -913,9 +935,21 @@ async def pc_delete_file(path: str, permanent: bool = False, pc: str = "default"
     return data.get("message", f"Deleted '{path}'")
 
 
+_PC_PREVIEW_MAX_BYTES_CEILING = 2_000_000  # 2 MB
+
+
 @mcp.tool()
 async def pc_read_file_preview(path: str, max_bytes: int = 4096, pc: str = "default") -> str:
     """Read the first max_bytes bytes of a text file on a PC. Useful for peeking before deciding what to do with it."""
+    # Clamp rather than pass through: organiser-agent's /preview allocates
+    # max_bytes BEFORE checking the real file size, so an uncapped value
+    # here (e.g. 10_000_000_000) can be used to trigger a memory-exhaustion
+    # crash on the PC from a single MCP tool call (security-qa finding 4).
+    # This clamp is the server.py-side half of the fix; the real fix is a
+    # bounds check inside organiser-agent.cpp itself (pc-agent's scope).
+    if max_bytes <= 0:
+        max_bytes = 4096
+    max_bytes = min(max_bytes, _PC_PREVIEW_MAX_BYTES_CEILING)
     data = await _org_get("/preview", {"path": path, "max_bytes": max_bytes}, pc=pc)
     return data.get("content", "(empty or binary file)")
 
@@ -1041,6 +1075,12 @@ def _parse_location(loc: str) -> tuple[str, str, str]:
         if ":" not in rest:
             raise ValueError(f"Malformed '{kind}:' location '{loc}' -- expected '{kind}:name:path'")
         name, path = rest.split(":", 1)
+        # An empty name (e.g. "pc::/some/path") used to silently fall
+        # back to the default PC / auto account downstream instead of
+        # raising -- reject it here instead (security-qa finding 9).
+        name_check = name.split("@", 1)[0] if kind == "codespace" else name
+        if not name_check:
+            raise ValueError(f"Malformed '{kind}:' location '{loc}' -- empty name before the path")
         return kind, name, path
     raise ValueError(f"Unknown location kind '{kind}' -- expected sandbox, server, pc, or codespace")
 

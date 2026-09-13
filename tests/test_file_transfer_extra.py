@@ -33,7 +33,7 @@ import server as srv
     ("", False),
     (":", False),                  # kind="" -> unknown kind -> ValueError
     ("pc:", False),                # no second colon -> ValueError
-    ("pc::", True),                # DOES parse: kind="pc", name="", path="" (see finding below)
+    ("pc::", False),               # FIXED (was True): empty pc name now rejected by lead, see below
     ("codespace:", False),
     ("unknown-kind:/x", False),
     ("SANDBOX:/x", True),          # kind is lowercased -- valid by design, not a bug
@@ -46,41 +46,31 @@ def test_various_malformed_or_edge_addresses(loc, expect_valid):
     kind, name, path = srv._parse_location(loc)
     if loc == "SANDBOX:/x":
         assert kind == "sandbox" and path == "/x"
-    elif loc == "pc::":
-        # FINDING (low severity): _parse_location happily accepts "pc::"
-        # as kind="pc", name="", path="" -- an entirely empty path -- with
-        # no validation that path is non-empty. It only surfaces as an
-        # error much further downstream (organiser-agent's own "Missing
-        # 'path'" 400), with a much less clear message than a proper
-        # "malformed location" would give at the point of parsing.
-        assert kind == "pc" and name == "" and path == ""
 
 
-def test_pc_location_with_empty_name_silently_falls_back_to_default():
-    """Documents a real (low-severity) gap: 'pc::C:\\path' parses with
-    name="" , and downstream code does `pc=name or "default"` -- so a
-    malformed/typo'd empty PC name is silently treated as the "default"
-    PC rather than raising a clear error. Not a privilege issue (still
-    requires the one shared bearer token), but a caller who meant to
-    target a specific PC and fat-fingered the address gets silently
-    redirected to a different machine instead of an error."""
-    kind, name, path = srv._parse_location("pc::C:\\Users\\me\\file.txt")
-    assert kind == "pc"
-    assert name == ""  # falls back to "default" downstream, not rejected here
+def test_pc_location_with_empty_name_now_raises():
+    """FIXED (was: silently fell back to the default PC). Originally
+    documented a real gap -- 'pc::C:\\path' parsed with name="", and
+    downstream code did `pc=name or "default"`, so a malformed/typo'd
+    empty PC name was silently treated as the "default" PC instead of
+    raising. Lead added an explicit check in _parse_location; a blank
+    name is now a clear ValueError at parse time instead of a silent
+    redirect to a possibly-wrong machine."""
+    with pytest.raises(ValueError, match="empty name"):
+        srv._parse_location("pc::C:\\Users\\me\\file.txt")
 
 
-def test_codespace_unknown_account_silently_falls_back_to_auto(monkeypatch):
-    """Documents a real (low-severity) gap: _get_token() only special-cases
-    'primary'/'secondary'/'tertiary'; any other account string (typo, or
-    garbage) falls through to the same branch as 'auto' instead of being
-    rejected. It does not grant escalated access (still picks from the
-    same configured tokens via the auto order), but a typo'd account
-    silently uses a DIFFERENT token than the one the caller named,
-    instead of erroring."""
+def test_codespace_unknown_account_now_raises(monkeypatch):
+    """FIXED (was: silently fell through to auto's behavior). Originally
+    documented a real gap -- _get_token() only special-cased
+    'primary'/'secondary'/'tertiary', so any other string (typo or
+    garbage) silently used a DIFFERENT token than the one the caller
+    named instead of erroring. Lead added an explicit allowlist check;
+    an unrecognized account is now a clear ValueError."""
     monkeypatch.setenv("GITHUB_TOKEN", "primary-tok")
     monkeypatch.setenv("GITHUB_TOKEN_SECONDARY", "secondary-tok")
-    token, used = srv._get_token("this-is-not-a-real-account")
-    assert used == "primary"  # silently == auto, not an error
+    with pytest.raises(ValueError, match="this-is-not-a-real-account"):
+        srv._get_token("this-is-not-a-real-account")
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +199,14 @@ async def _write_helper(srv, data):
 # the pass-through on the server.py side (the other half of that chain).
 # ---------------------------------------------------------------------------
 
-def test_pc_read_file_preview_max_bytes_is_not_clamped(monkeypatch):
+def test_pc_read_file_preview_max_bytes_now_clamped(monkeypatch):
+    """FIXED (was: passed through uncapped). Originally documented that
+    server.py forwarded caller-supplied max_bytes straight to
+    organiser-agent with no upper bound, chaining into the confirmed
+    std::bad_alloc DoS in organiser-agent.cpp's h_preview (see
+    SECURITY_FINDINGS.md finding 4). Lead added a ceiling clamp in
+    server.py as the server-side half of the fix; the real fix (a bounds
+    check inside organiser-agent.cpp itself) is pc-agent's scope."""
     captured = {}
 
     async def fake_org_get(path, params=None, pc="default"):
@@ -218,8 +215,4 @@ def test_pc_read_file_preview_max_bytes_is_not_clamped(monkeypatch):
 
     monkeypatch.setattr(srv, "_org_get", fake_org_get)
     asyncio.run(srv.pc_read_file_preview("C:\\some\\file.txt", max_bytes=10_000_000_000))
-    assert captured["params"]["max_bytes"] == 10_000_000_000, (
-        "server.py does not clamp max_bytes before forwarding to "
-        "organiser-agent -- chains into the confirmed std::bad_alloc DoS "
-        "in organiser-agent.cpp's h_preview (see SECURITY_FINDINGS.md)"
-    )
+    assert captured["params"]["max_bytes"] == srv._PC_PREVIEW_MAX_BYTES_CEILING
