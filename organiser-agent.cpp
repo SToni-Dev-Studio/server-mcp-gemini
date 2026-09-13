@@ -24,6 +24,14 @@
  *   Program: C:\path\to\organiser-agent.exe
  *   Start in: C:\path\to\
  *   [ ] Run only when user is logged on  ← uncheck for hidden start
+ *
+ * Multi-PC / machine identity:
+ *   Set ORGANISER_MACHINE_NAME to match this machine's entry in the
+ *   hub's PCS registry (see pc-tunnel@.service), e.g. "desktop" or
+ *   "laptop". If unset, falls back to the OS hostname. A separate,
+ *   randomly-generated machine_id is persisted next to the config dir
+ *   on first run — see machine registry section below for why both
+ *   exist.
  */
 
 #ifdef _WIN32
@@ -45,6 +53,10 @@
   #include <unistd.h>
   #include <dirent.h>
   #include <sys/stat.h>
+  #include <sys/wait.h>
+  #include <sys/select.h>
+  #include <signal.h>
+  #include <fcntl.h>
   #define IS_WIN 0
   #define SOCKET int
   #define INVALID_SOCKET -1
@@ -65,6 +77,7 @@
 #include <iostream>
 #include <map>
 #include <mutex>
+#include <random>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -78,7 +91,8 @@ namespace fs = std::filesystem;
 
 static int         g_port   = 7842;
 static std::string g_secret = "";
-static const char* VERSION  = "2.0.0-cpp";
+static const char* VERSION  = "2.1.0-cpp";
+static const int   RUN_COMMAND_TIMEOUT_S = 60;
 
 // ---------------------------------------------------------------------------
 // Tiny JSON builder  (no external deps)
@@ -213,42 +227,177 @@ static bool trash_path(const fs::path& p, std::string& err) {
 #endif
 }
 
-// Run shell command, return stdout+stderr (capped at cap bytes)
+// ---------------------------------------------------------------------------
+// run_command — WITH a real, enforced timeout.
+//
+// The previous implementation used popen()/_popen(), which blocks the
+// calling thread until the child exits with no way to interrupt it — a
+// runaway or hung command (or one that intentionally ignores stdin/stdout
+// closing) would tie up that connection thread forever. This version
+// spawns the child directly (fork/exec on POSIX, CreateProcess on
+// Windows) so the parent can poll for completion, enforce a deadline, and
+// forcibly kill the child (and its process tree) if the deadline passes.
+// ---------------------------------------------------------------------------
+
+#if IS_WIN
 static std::string run_command(const std::string& cmd, const std::string& cwd,
-                               int& retcode, size_t cap = 8192) {
-    std::string full_cmd = cmd;
-    if (!cwd.empty()) {
-#if IS_WIN
-        full_cmd = "cd /d \"" + cwd + "\" && " + cmd;
-#else
-        full_cmd = "cd \"" + cwd + "\" && " + cmd;
-#endif
+                                int& retcode, bool& timed_out, size_t cap = 8192,
+                                int timeout_s = RUN_COMMAND_TIMEOUT_S) {
+    timed_out = false;
+    std::string full_cmd = "cmd /c " + cmd;
+
+    SECURITY_ATTRIBUTES sa = {}; sa.nLength = sizeof(sa); sa.bInheritHandle = TRUE;
+    HANDLE hReadPipe, hWritePipe;
+    if (!CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
+        retcode = -1; return "Failed to create pipe";
     }
-#if IS_WIN
-    full_cmd = "cmd /c " + full_cmd + " 2>&1";
-#else
-    full_cmd = "/bin/bash -c '" + full_cmd + "' 2>&1";
-#endif
-    FILE* pipe =
-#if IS_WIN
-        _popen(full_cmd.c_str(), "r");
-#else
-        popen(full_cmd.c_str(), "r");
-#endif
-    if (!pipe) { retcode = -1; return "Failed to open pipe"; }
+    SetHandleInformation(hReadPipe, HANDLE_FLAG_INHERIT, 0);
+
+    STARTUPINFOA si = {}; si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdOutput = hWritePipe;
+    si.hStdError  = hWritePipe;
+    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
+    PROCESS_INFORMATION pi = {};
+
+    // Job object so killing the child also kills anything it spawned
+    // (e.g. `cmd /c foo.bat` that launches its own children).
+    HANDLE hJob = CreateJobObjectA(nullptr, nullptr);
+    if (hJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli = {};
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        SetInformationJobObject(hJob, JobObjectExtendedLimitInformation, &jeli, sizeof(jeli));
+    }
+
+    std::vector<char> cmdline(full_cmd.begin(), full_cmd.end());
+    cmdline.push_back('\0');
+
+    BOOL ok = CreateProcessA(
+        nullptr, cmdline.data(), nullptr, nullptr, TRUE,
+        CREATE_NO_WINDOW | CREATE_SUSPENDED,
+        nullptr, cwd.empty() ? nullptr : cwd.c_str(), &si, &pi);
+
+    CloseHandle(hWritePipe);
+    if (!ok) {
+        CloseHandle(hReadPipe);
+        if (hJob) CloseHandle(hJob);
+        retcode = -1;
+        return "CreateProcess failed: " + std::to_string(GetLastError());
+    }
+    if (hJob) AssignProcessToJobObject(hJob, pi.hProcess);
+    ResumeThread(pi.hThread);
+
     std::string out;
-    char buf[1024];
-    while (fgets(buf, sizeof(buf), pipe) && out.size() < cap)
-        out += buf;
-    retcode =
-#if IS_WIN
-        _pclose(pipe);
-#else
-        pclose(pipe);
-#endif
+    DWORD waited = WaitForSingleObject(pi.hProcess, (DWORD)timeout_s * 1000);
+    if (waited == WAIT_TIMEOUT) {
+        timed_out = true;
+        if (hJob) TerminateJobObject(hJob, 1);
+        else TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, 2000);
+    }
+
+    // Drain whatever the child wrote (bounded read; no PeekNamedPipe loop
+    // needed since the process has already exited or been killed by now).
+    char buf[4096]; DWORD nread = 0;
+    while (out.size() < cap && ReadFile(hReadPipe, buf, sizeof(buf), &nread, nullptr) && nread > 0) {
+        out.append(buf, nread);
+    }
+
+    DWORD exitCode = (DWORD)-1;
+    if (!timed_out) GetExitCodeProcess(pi.hProcess, &exitCode);
+    retcode = timed_out ? -1 : (int)exitCode;
+
+    CloseHandle(hReadPipe);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+    if (hJob) CloseHandle(hJob);
+
     if (out.size() > cap) out = out.substr(out.size() - cap);
     return out;
 }
+#else
+static std::string run_command(const std::string& cmd, const std::string& cwd,
+                                int& retcode, bool& timed_out, size_t cap = 8192,
+                                int timeout_s = RUN_COMMAND_TIMEOUT_S) {
+    timed_out = false;
+    int pipefd[2];
+    if (pipe(pipefd) != 0) { retcode = -1; return "Failed to create pipe"; }
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]); close(pipefd[1]);
+        retcode = -1; return "fork() failed";
+    }
+    if (pid == 0) {
+        // Child: own process group so a timeout kill takes any
+        // grandchildren (e.g. `sh -c "sleep 100 & wait"`) with it.
+        setpgid(0, 0);
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        if (!cwd.empty()) {
+            if (chdir(cwd.c_str()) != 0) _exit(127);
+        }
+        execl("/bin/bash", "bash", "-c", cmd.c_str(), (char*)nullptr);
+        _exit(127); // exec failed
+    }
+
+    // Parent
+    close(pipefd[1]);
+    int flags = fcntl(pipefd[0], F_GETFL, 0);
+    fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+
+    std::string out;
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_s);
+    int status = 0;
+    bool exited = false;
+
+    while (true) {
+        fd_set fds; FD_ZERO(&fds); FD_SET(pipefd[0], &fds);
+        struct timeval tv; tv.tv_sec = 0; tv.tv_usec = 200000; // 200ms poll
+        int sel = select(pipefd[0] + 1, &fds, nullptr, nullptr, &tv);
+        if (sel > 0 && FD_ISSET(pipefd[0], &fds)) {
+            char buf[4096];
+            ssize_t n = read(pipefd[0], buf, sizeof(buf));
+            if (n > 0 && out.size() < cap) out.append(buf, n);
+        }
+
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) { exited = true; break; }
+
+        if (std::chrono::steady_clock::now() >= deadline) {
+            timed_out = true;
+            kill(-pid, SIGKILL);   // whole process group
+            kill(pid, SIGKILL);    // belt-and-braces if setpgid raced
+            waitpid(pid, &status, 0);
+            break;
+        }
+    }
+
+    // Drain any remaining buffered output after exit/kill.
+    if (exited || timed_out) {
+        char buf[4096]; ssize_t n;
+        while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
+            if (out.size() < cap) out.append(buf, n);
+        }
+    }
+    close(pipefd[0]);
+
+    if (timed_out) {
+        retcode = -1;
+    } else if (WIFEXITED(status)) {
+        retcode = WEXITSTATUS(status);
+    } else if (WIFSIGNALED(status)) {
+        retcode = -WTERMSIG(status);
+    } else {
+        retcode = -1;
+    }
+
+    if (out.size() > cap) out = out.substr(out.size() - cap);
+    return out;
+}
+#endif
 
 // MD5 (simple implementation — good enough for duplicate detection)
 static std::string md5_file(const fs::path& p) {
@@ -266,6 +415,37 @@ static std::string md5_file(const fs::path& p) {
     }
     char out[17]; snprintf(out,sizeof(out),"%016llx",(unsigned long long)h);
     return out;
+}
+
+// Base64 decode (returns false on malformed input rather than guessing)
+static bool b64_decode(const std::string& in, std::vector<uint8_t>& out) {
+    auto val = [](unsigned char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '+') return 62;
+        if (c == '/') return 63;
+        return -1;
+    };
+    std::string clean;
+    clean.reserve(in.size());
+    for (unsigned char c : in) {
+        if (c == '=' || c == '\n' || c == '\r' || c == ' ') continue;
+        if (val(c) < 0) return false; // malformed — reject rather than skip silently
+        clean += c;
+    }
+    out.clear();
+    out.reserve(clean.size() / 4 * 3 + 3);
+    int buf = 0, bits = 0;
+    for (unsigned char c : clean) {
+        buf = (buf << 6) | val(c);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((uint8_t)((buf >> bits) & 0xFF));
+        }
+    }
+    return true;
 }
 
 // Base64 encode
@@ -445,6 +625,124 @@ static void add_route(const std::string& method, const std::string& path, Handle
 }
 
 // ---------------------------------------------------------------------------
+// Machine registry
+// ---------------------------------------------------------------------------
+// Mirrors organiser-agent.py's scheme (kept in sync deliberately, see
+// coordination/status/pc-agent.md):
+//   machine_name — human label matching the hub's PCS key (e.g.
+//                  "desktop"), from ORGANISER_MACHINE_NAME or else the
+//                  OS hostname.
+//   machine_id   — random id, generated once, persisted to a small
+//                  config file, survives renames/restarts. Distinguishes
+//                  "same agent, renamed" from "different agent, same
+//                  name reused".
+
+static fs::path config_dir() {
+    fs::path base;
+#if IS_WIN
+    const char* appdata = getenv("APPDATA");
+    base = appdata ? fs::path(appdata) : fs::path(getenv("USERPROFILE") ? getenv("USERPROFILE") : ".") / "AppData" / "Roaming";
+#else
+    const char* xdg = getenv("XDG_CONFIG_HOME");
+    base = xdg ? fs::path(xdg) : fs::path(getenv("HOME") ? getenv("HOME") : ".") / ".config";
+#endif
+    fs::path d = base / "organiser-agent";
+    std::error_code ec;
+    fs::create_directories(d, ec);
+    return d;
+}
+
+static std::string gen_uuid_v4() {
+    std::random_device rd;
+    std::mt19937_64 gen(rd());
+    std::uniform_int_distribution<int> dis(0, 15);
+    const char* hex = "0123456789abcdef";
+    std::string s = "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx";
+    for (auto& c : s) {
+        if (c == 'x') c = hex[dis(gen)];
+        else if (c == 'y') c = hex[(dis(gen) & 0x3) | 0x8]; // RFC4122 variant bits
+    }
+    return s;
+}
+
+// Deliberately not full JSON parsing here (same tiny json_str helper the
+// rest of the file uses) — this file is one record, not general config.
+static std::string load_or_create_machine_id(const fs::path& config_path) {
+    if (fs::exists(config_path)) {
+        std::ifstream f(config_path, std::ios::binary);
+        std::stringstream ss; ss << f.rdbuf();
+        std::string existing = json_str(ss.str(), "machine_id", "");
+        if (!existing.empty()) return existing;
+        // fall through — corrupt/empty file, regenerate rather than crash
+    }
+    std::string id = gen_uuid_v4();
+    std::ofstream out(config_path, std::ios::binary | std::ios::trunc);
+    if (out) out << Json::obj({{"machine_id", Json::str(id)}});
+    return id;
+}
+
+static std::string get_hostname() {
+#if IS_WIN
+    char buf[256]; DWORD sz = sizeof(buf);
+    if (GetComputerNameA(buf, &sz)) return std::string(buf, sz);
+    return "unknown-windows-host";
+#else
+    char buf[256];
+    if (gethostname(buf, sizeof(buf)) == 0) return std::string(buf);
+    return "unknown-host";
+#endif
+}
+
+static fs::path g_machine_config_path;
+static std::string g_machine_id;
+static std::string g_machine_name;
+static std::string g_config_saved_name;   // last value saved via /config (persisted)
+static std::string g_config_saved_secret; // last value saved via /config (persisted)
+
+// Deliberately reads the same three fields with the same tiny json_str
+// helper used everywhere else in this file — this is one small record,
+// not a case for a general JSON parser.
+static void load_config_extras() {
+    if (!fs::exists(g_machine_config_path)) return;
+    std::ifstream f(g_machine_config_path, std::ios::binary);
+    std::stringstream ss; ss << f.rdbuf();
+    std::string content = ss.str();
+    g_config_saved_name   = json_str(content, "machine_name", "");
+    g_config_saved_secret = json_str(content, "secret", "");
+}
+
+static void save_config_extras() {
+    // Preserve machine_id (already in the file) while updating the other
+    // two fields — this is a full rewrite of one small record, matching
+    // the file's actual size (a few short fields), not a partial patch.
+    std::ofstream out(g_machine_config_path, std::ios::binary | std::ios::trunc);
+    if (out) {
+        out << Json::obj({
+            {"machine_id",   Json::str(g_machine_id)},
+            {"machine_name", Json::str(g_config_saved_name)},
+            {"secret",       Json::str(g_config_saved_secret)},
+        });
+    }
+}
+
+static void init_machine_registry() {
+    g_machine_config_path = config_dir() / "machine.json";
+    g_machine_id = load_or_create_machine_id(g_machine_config_path);
+    load_config_extras();
+
+    // Precedence: env var (set at service-install time) > config file
+    // (set later via /admin) > OS hostname / empty secret.
+    const char* name_env = getenv("ORGANISER_MACHINE_NAME");
+    g_machine_name = (name_env && *name_env) ? std::string(name_env)
+                    : (!g_config_saved_name.empty() ? g_config_saved_name : get_hostname());
+
+    const char* secret_env = getenv("ORGANISER_SECRET");
+    if (!(secret_env && *secret_env) && !g_config_saved_secret.empty()) {
+        g_secret = g_config_saved_secret;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Protected paths
 // ---------------------------------------------------------------------------
 // The Windows system directory (C:\Windows — System32, SysWOW64, WinSxS,
@@ -510,6 +808,8 @@ static Response h_status(const Request&) {
         {"platform",        Json::str(platform_name())},
         {"trash_available", Json::boolean(true)},
         {"watched_folders", "[]"},
+        {"machine_id",      Json::str(g_machine_id)},
+        {"machine_name",    Json::str(g_machine_name)},
     }));
 }
 
@@ -664,8 +964,21 @@ static Response h_run_command(const Request& req) {
     std::string cmd = json_str(req.body, "command");
     std::string cwd = json_str(req.body, "working_dir");
     if (cmd.empty()) return Response::err(400, "No command provided");
+    if (!cwd.empty()) {
+        std::error_code ec;
+        if (!fs::is_directory(cwd, ec)) {
+            return Response::err(400, "working_dir does not exist or is not a directory: " + cwd);
+        }
+    }
     int rc = 0;
-    std::string out = run_command(cmd, cwd, rc);
+    bool timed_out = false;
+    std::string out = run_command(cmd, cwd, rc, timed_out);
+    if (timed_out) {
+        return Response::json(408, Json::obj({
+            {"error", Json::str("Command timed out after " + std::to_string(RUN_COMMAND_TIMEOUT_S) + "s")},
+            {"stdout", Json::str(out)},
+        }));
+    }
     return Response::ok(Json::obj({
         {"returncode", Json::num(rc)},
         {"stdout",     Json::str(out)},
@@ -714,13 +1027,25 @@ static Response h_duplicates(const Request& req) {
 
 static Response h_screenshot(const Request& req) {
 #if IS_WIN
-    int w=0, h=0;
-    std::vector<uint8_t> data = screenshot_png(w, h);
-    std::string b64 = b64_encode(data);
     std::string save_path = json_str(req.body, "save_path");
     if (!save_path.empty()) {
+        Response blocked;
+        if (reject_if_protected(fs::path(save_path), blocked)) return blocked;
+    }
+    int w=0, h=0;
+    std::vector<uint8_t> data;
+    try {
+        data = screenshot_png(w, h);
+    } catch (std::exception& e) {
+        return Response::err(500, std::string("Screenshot capture failed: ") + e.what());
+    }
+    if (data.empty()) return Response::err(500, "Screenshot capture failed: no data captured");
+    std::string b64 = b64_encode(data);
+    if (!save_path.empty()) {
         std::ofstream f(save_path, std::ios::binary);
-        if (f) f.write((char*)data.data(), data.size());
+        if (!f) return Response::err(500, "Screenshot captured but failed to open save_path for writing: " + save_path);
+        f.write((char*)data.data(), data.size());
+        if (!f) return Response::err(500, "Screenshot captured but failed to write save_path: " + save_path);
     }
     std::string dim = std::to_string(w) + "x" + std::to_string(h);
     return Response::ok(Json::obj({
@@ -734,13 +1059,36 @@ static Response h_screenshot(const Request& req) {
 #endif
 }
 
+// Sentinel used to tell "content_b64 absent" from "content_b64 present
+// but empty" — json_str's own default can't distinguish those since ""
+// is a valid (if useless) empty-file write.
+static const std::string CONTENT_B64_ABSENT = "\x01__absent__\x01";
+
 static Response h_write_file(const Request& req) {
-    std::string path_s  = json_str(req.body, "path");
-    std::string content = json_str(req.body, "content");
+    std::string path_s = json_str(req.body, "path");
     if (path_s.empty()) return Response::err(400, "No path provided");
     fs::path p(path_s);
     Response blocked;
     if (reject_if_protected(p, blocked)) return blocked;
+
+    std::string content_b64 = json_str(req.body, "content_b64", CONTENT_B64_ABSENT);
+    if (content_b64 != CONTENT_B64_ABSENT) {
+        std::vector<uint8_t> raw;
+        if (!b64_decode(content_b64, raw)) {
+            return Response::err(400, "Invalid base64 in content_b64");
+        }
+        try {
+            fs::create_directories(p.parent_path());
+            std::ofstream f(p, std::ios::binary);
+            if (!f) return Response::err(500, "Cannot open file for writing");
+            f.write((const char*)raw.data(), (std::streamsize)raw.size());
+        } catch (std::exception& e) { return Response::err(500, e.what()); }
+        return Response::ok(Json::obj({
+            {"message", Json::str("Written to '" + path_s + "' (" + std::to_string(raw.size()) + " bytes, binary)")},
+        }));
+    }
+
+    std::string content = json_str(req.body, "content");
     try {
         fs::create_directories(p.parent_path());
         std::ofstream f(p);
@@ -752,6 +1100,133 @@ static Response h_write_file(const Request& req) {
     }));
 }
 
+// Binary-safe counterpart to /preview (which reads/returns text). Lets
+// file_transfer's pc: leg move binaries to/from a PC without corruption.
+static Response h_read_file_b64(const Request& req) {
+    std::string path_s = req.query.count("path") ? req.query.at("path") : "";
+    size_t max_bytes = req.query.count("max_bytes")
+        ? (size_t)std::stoull(req.query.at("max_bytes"))
+        : 10 * 1024 * 1024; // 10MB default cap
+    if (path_s.empty()) return Response::err(400, "Missing 'path'");
+    fs::path p(path_s);
+    Response blocked;
+    if (reject_if_protected(p, blocked)) return blocked;
+    if (!fs::exists(p)) return Response::err(404, "Path does not exist: " + path_s);
+    if (!fs::is_regular_file(p)) return Response::err(400, "Not a file");
+
+    std::error_code ec;
+    uintmax_t size = fs::file_size(p, ec);
+    std::ifstream f(p, std::ios::binary);
+    if (!f) return Response::err(500, "Cannot open file");
+    std::vector<uint8_t> buf(max_bytes);
+    f.read((char*)buf.data(), (std::streamsize)max_bytes);
+    buf.resize((size_t)f.gcount());
+
+    bool truncated = !ec && size > buf.size();
+    return Response::ok(Json::obj({
+        {"path",           Json::str(path_s)},
+        {"content_b64",    Json::str(b64_encode(buf))},
+        {"size_bytes",     Json::num(ec ? (long long)buf.size() : (long long)size)},
+        {"returned_bytes", Json::num((long long)buf.size())},
+        {"truncated",      Json::boolean(truncated)},
+    }));
+}
+
+// ---------------------------------------------------------------------------
+// Local config / admin dashboard — see coordination/status/pc-agent.md and
+// BROADCAST [0006]. Same access-control model as every other endpoint:
+// loopback bind + optional ORGANISER_SECRET, not a separate auth scheme.
+// ---------------------------------------------------------------------------
+
+static Response h_get_config(const Request&) {
+    const char* secret_env = getenv("ORGANISER_SECRET");
+    const char* name_env = getenv("ORGANISER_MACHINE_NAME");
+    std::string source = (secret_env && *secret_env) ? "env" : (!g_secret.empty() ? "config_file" : "none");
+    return Response::ok(Json::obj({
+        {"machine_id",     Json::str(g_machine_id)},
+        {"machine_name",   Json::str(g_machine_name)},
+        {"secret_set",     Json::boolean(!g_secret.empty())},
+        {"secret_source",  Json::str(source)},
+        {"config_path",    Json::str(g_machine_config_path.string())},
+        {"name_env_set",   Json::boolean(name_env && *name_env)},
+    }));
+}
+
+static Response h_post_config(const Request& req) {
+    bool have_name = req.body.find("\"machine_name\"") != std::string::npos;
+    bool have_secret = req.body.find("\"secret\"") != std::string::npos;
+    if (!have_name && !have_secret) {
+        return Response::err(400, "Nothing to update. Send machine_name and/or secret.");
+    }
+
+    if (have_name) {
+        std::string name = json_str(req.body, "machine_name");
+        // trim
+        size_t a = name.find_first_not_of(" \t");
+        size_t b = name.find_last_not_of(" \t");
+        name = (a == std::string::npos) ? "" : name.substr(a, b - a + 1);
+        if (name.empty()) return Response::err(400, "machine_name cannot be empty");
+        g_config_saved_name = name;
+        const char* name_env = getenv("ORGANISER_MACHINE_NAME");
+        if (!(name_env && *name_env)) g_machine_name = name;
+    }
+
+    if (have_secret) {
+        // Empty string is allowed — removes the secret, matching
+        // ORGANISER_SECRET-unset semantics.
+        std::string secret = json_str(req.body, "secret");
+        g_config_saved_secret = secret;
+        const char* secret_env = getenv("ORGANISER_SECRET");
+        if (!(secret_env && *secret_env)) g_secret = secret;
+    }
+
+    save_config_extras();
+    return Response::ok(Json::obj({
+        {"message",      Json::str("Config updated")},
+        {"machine_name", Json::str(g_machine_name)},
+        {"secret_set",   Json::boolean(!g_secret.empty())},
+    }));
+}
+
+static Response h_admin_page(const Request&) {
+    // No auth gate on the page shell itself (same reasoning as the Python
+    // build): the shell contains no secrets, and every API call it makes
+    // (/config) is separately auth-checked.
+    static const char* html =
+"<!DOCTYPE html><html><head><title>Organiser Agent - Local Config</title>"
+"<style>body{font-family:system-ui,sans-serif;max-width:480px;margin:40px auto}"
+"label{display:block;margin-top:12px;font-weight:600}input{width:100%;padding:6px;"
+"box-sizing:border-box}button{margin-top:16px;padding:8px 16px}"
+"#status{margin-top:12px;white-space:pre-wrap;font-family:monospace;font-size:.85em}"
+"</style></head><body>"
+"<h2>Organiser Agent - Local Config</h2>"
+"<p>Changes here are saved to this PC's local config file and take effect immediately.</p>"
+"<label>Secret (X-Organiser-Secret, if one is set)<input id=\"authSecret\" type=\"password\"></label>"
+"<hr>"
+"<label>Machine name<input id=\"machineName\" type=\"text\"></label>"
+"<label>New secret (leave blank to remove)<input id=\"newSecret\" type=\"password\"></label>"
+"<button onclick=\"loadConfig()\">Refresh current config</button>"
+"<button onclick=\"saveConfig()\">Save</button>"
+"<div id=\"status\"></div>"
+"<script>"
+"async function call(path,opts){opts=opts||{};opts.headers=Object.assign({'Content-Type':'application/json'},opts.headers||{});"
+"var s=document.getElementById('authSecret').value;if(s)opts.headers['X-Organiser-Secret']=s;"
+"const r=await fetch(path,opts);const j=await r.json().catch(()=>({}));return{ok:r.ok,status:r.status,body:j};}"
+"async function loadConfig(){const res=await call('/config');document.getElementById('status').textContent=JSON.stringify(res.body,null,2);"
+"if(res.ok)document.getElementById('machineName').value=res.body.machine_name||'';}"
+"async function saveConfig(){const updates={};const mn=document.getElementById('machineName').value.trim();"
+"if(mn)updates.machine_name=mn;const ns=document.getElementById('newSecret');if(ns.value!=='')updates.secret=ns.value;"
+"const res=await call('/config',{method:'POST',body:JSON.stringify(updates)});"
+"document.getElementById('status').textContent=JSON.stringify(res.body,null,2);ns.value='';}"
+"loadConfig();"
+"</script></body></html>";
+    Response r;
+    r.status = 200;
+    r.content_type = "text/html; charset=utf-8";
+    r.body = html;
+    return r;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP parsing and dispatch
 // ---------------------------------------------------------------------------
@@ -761,7 +1236,9 @@ static std::string status_text(int code) {
         case 200: return "OK";
         case 400: return "Bad Request";
         case 401: return "Unauthorized";
+        case 403: return "Forbidden";
         case 404: return "Not Found";
+        case 408: return "Request Timeout";
         case 500: return "Internal Server Error";
         case 501: return "Not Implemented";
         default:  return "Unknown";
@@ -833,8 +1310,13 @@ static void handle_conn(SOCKET sock) {
     if (body_pos != std::string::npos)
         req.body = raw.substr(body_pos + 4);
 
-    // Auth check
-    if (!g_secret.empty()) {
+    // Auth check — every route except the /admin page shell itself.
+    // /admin's HTML contains no secrets and every API call it makes
+    // (/config) is separately checked here like any other route; but the
+    // page has to be loadable WITHOUT the secret first, or there'd be no
+    // way to type the secret into its form in the first place. Matches
+    // the equivalent comment in organiser-agent.py's admin_page().
+    if (!g_secret.empty() && req.path != "/admin") {
         std::string hdr = req.headers.count("x-organiser-secret") ? req.headers.at("x-organiser-secret") : "";
         if (hdr != g_secret) {
             std::string ubody = "{\"error\":\"Unauthorized\"}";
@@ -885,6 +1367,8 @@ int main() {
     if (port_env)   g_port   = atoi(port_env);
     if (secret_env) g_secret = secret_env;
 
+    init_machine_registry();
+
     // Register routes
     add_route("GET",  "/status",       h_status);
     add_route("GET",  "/list",         h_list);
@@ -896,6 +1380,10 @@ int main() {
     add_route("GET",  "/duplicates",   h_duplicates);
     add_route("POST", "/screenshot",   h_screenshot);
     add_route("POST", "/write_file",   h_write_file);
+    add_route("GET",  "/read_file_b64",h_read_file_b64);
+    add_route("GET",  "/config",       h_get_config);
+    add_route("POST", "/config",       h_post_config);
+    add_route("GET",  "/admin",        h_admin_page);
 
     // Socket setup
 #if IS_WIN
@@ -927,6 +1415,7 @@ int main() {
     std::cout << "================================================\n";
     std::cout << "  Organiser Agent v" << VERSION << "\n";
     std::cout << "  Platform : " << platform_name() << "\n";
+    std::cout << "  Machine  : " << g_machine_name << " (" << g_machine_id << ")\n";
     std::cout << "  Auth     : " << (g_secret.empty() ? "NO SECRET (open)" : "secret set") << "\n";
     std::cout << "  Listening: http://127.0.0.1:" << g_port << " (loopback only)\n";
     std::cout << "================================================\n";
