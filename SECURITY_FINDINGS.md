@@ -32,6 +32,12 @@ writing (`python3 -m pytest tests/ -v`).
 > by pc-agent, and server.py's `pc_read_file_preview` by lead in commit
 > `7dc1695` (already merged into this branch) — confirmed by reading the
 > actual clamp in server.py, not assumed from the broadcast alone.
+> Finding 7's fix was merged into `main` before lead independently
+> rediscovered it against that pre-fix state while wiring `file_transfer`'s
+> `pc:` leg — a merge-timing coincidence, not a real regression. Once
+> reconciled: the fix holds end-to-end against the exact 128,000-byte
+> payload that caught it originally, and `_PC_TRANSFER_SAFE_MAX_BYTES`
+> has been raised back to the general 15MB cap.
 
 ---
 
@@ -45,7 +51,7 @@ writing (`python3 -m pytest tests/ -v`).
 | 4 | `/preview` `max_bytes` unbounded → memory-exhaustion DoS | organiser-agent.cpp + server.py | Medium-High | **FULLY FIXED** — organiser-agent.cpp/.py side by pc-agent (20MB ceiling + real-file-size clamp, both `/preview` and `/read_file_b64`), server.py side (`pc_read_file_preview`) by lead in commit `7dc1695` (clamps to `_PC_PREVIEW_MAX_BYTES_CEILING` before forwarding). Verified both halves independently |
 | 5 | Secret comparison not constant-time | organiser-agent.cpp | Low | **FIXED by pc-agent** — see status update below |
 | 6 | SSH tunnel `StrictHostKeyChecking=no` | pc-tunnel@.service | Low | **FIXED by pc-agent** — see status update below |
-| 7 | Oversized request body silently truncated | organiser-agent.cpp | Medium | **FIXED by pc-agent** (commit `86caa29`, not yet merged into main as of this branch's last main-merge — was rediscovered independently by lead against the pre-fix main state, which is expected/correct given the merge timing; see status update below for the reconciled timeline and re-verification against the new `tests/test_file_transfer_pc_e2e.py`) |
+| 7 | Oversized request body silently truncated | organiser-agent.cpp | Medium | **FULLY FIXED AND VERIFIED END-TO-END** — pc-agent's fix (commit `86caa29`) closes it; re-verified against `tests/test_file_transfer_pc_e2e.py`'s exact 128,000-byte payload that originally caught it (now arrives byte-identical); `server.py`'s `_PC_TRANSFER_SAFE_MAX_BYTES` workaround raised to match `_FILE_TRANSFER_MAX_BYTES` (15MB) since the underlying bug it guarded against is gone. (Lead's independent rediscovery was correct at the time — that happened against the pre-fix state of `main`, before this commit was merged; see status update below for the full reconciled timeline.) |
 | 8 | `file_transfer` read-side has no upfront size cap | server.py | Low-Medium | Confirmed |
 | 9 | `pc::` / typo'd account silently degrade instead of erroring | server.py | Low | Confirmed |
 | 10 | Admin-cookie forgery (original bug) | server.py | — | **Already fixed on main**, fix independently re-verified |
@@ -294,6 +300,21 @@ operational downside.
 > now arrives complete (300000 bytes confirmed written to disk); a 26MB
 > body is cleanly rejected with 413 and the process stays alive and
 > responsive afterward.
+>
+> **End-to-end re-verification**: this fix was merged into `main` (bd8714c)
+> at an earlier commit than `86caa29` — lead independently rediscovered
+> this bug afterward while wiring `file_transfer`'s `pc:` leg, using the
+> exact 128,000-byte payload that had originally caught it, and added
+> `_PC_TRANSFER_SAFE_MAX_BYTES` (40KB) as a workaround plus a regression
+> test designed to start failing once the real fix landed. Once
+> `86caa29` was merged, that test (`test_organiser_agent_still_has_the_64kb_truncation_bug`)
+> was re-run and confirmed to fail in the expected direction (the full
+> 128,000 bytes now arrive intact) — inverted to
+> `test_organiser_agent_no_longer_has_the_64kb_truncation_bug` per its
+> own embedded instruction, and `_PC_TRANSFER_SAFE_MAX_BYTES` raised back
+> to match `_FILE_TRANSFER_MAX_BYTES` (15MB) since the workaround is no
+> longer needed. Full `tests/` suite (116 tests) re-run and passing after
+> this change.
 
 organiser-agent.cpp's `handle_conn` reads into a fixed `char buf[65536]`
 and stops once the buffer is full, *regardless* of whether the declared
