@@ -13,9 +13,9 @@ and `tests/test_file_transfer_extra.py`. All 50 tests pass as of this
 writing (`python3 -m pytest tests/ -v`).
 
 > **pc-agent update (see `coordination/status/pc-agent.md` for full
-> detail):** findings 1, 4 (organiser-agent.cpp side only), 5, 6, and 7
-> have been fixed and verified live against the compiled binary — not
-> just patched and assumed. `tests/test_organiser_agent_security.py`'s
+> detail):** findings 1, 4, 5, 6, and 7 have been fixed and verified live
+> against the compiled binary — not just patched and assumed.
+> `tests/test_organiser_agent_security.py`'s
 > `test_working_dir_command_injection` and
 > `test_oversized_max_bytes_does_not_crash_process` were updated in
 > place (not deleted) per their own original docstrings' instructions,
@@ -28,9 +28,10 @@ writing (`python3 -m pytest tests/ -v`).
 > **unverified by execution** — pc-agent has no Windows box either.
 > Finding 3 was deliberately left as-is (see pc-agent's status file for
 > reasoning — it's a default-behavior/product decision, not a pure
-> bugfix). Finding 4's server.py half (`pc_read_file_preview` forwarding
-> an unclamped `max_bytes`) is still open — outside organiser-agent.cpp/
-> organiser-agent.py, needs whoever owns server.py.
+> bugfix). Finding 4 is now fixed on BOTH sides: organiser-agent.cpp/.py
+> by pc-agent, and server.py's `pc_read_file_preview` by lead in commit
+> `7dc1695` (already merged into this branch) — confirmed by reading the
+> actual clamp in server.py, not assumed from the broadcast alone.
 
 ---
 
@@ -41,7 +42,7 @@ writing (`python3 -m pytest tests/ -v`).
 | 1 | `working_dir` shell injection (Linux, single-quote breakout) | organiser-agent.cpp | **High** | **FIXED by pc-agent** — see status update below |
 | 2 | `working_dir` shell injection (Windows, hypothesized) | organiser-agent.cpp | High (unverified) | **Likely fixed by the same rewrite as #1** (Windows path now uses CreateProcess's lpCurrentDirectory, never shell-concatenates working_dir) — but still **unverified by execution**, no Windows box available to pc-agent either. See status update below |
 | 3 | No-secret-configured = auth check skipped entirely | organiser-agent.cpp | High (conditional) | Confirmed — **left as-is, not silently changed**; see pc-agent's reasoning below |
-| 4 | `/preview` `max_bytes` unbounded → memory-exhaustion DoS | organiser-agent.cpp + server.py | Medium-High | **organiser-agent.cpp side FIXED** by pc-agent (both `/preview` and `/read_file_b64` now clamp to a 20MB ceiling and to real file size). **server.py side (`pc_read_file_preview` forwarding an unclamped `max_bytes`) is NOT fixed** — outside pc-agent's file ownership, needs whoever owns server.py |
+| 4 | `/preview` `max_bytes` unbounded → memory-exhaustion DoS | organiser-agent.cpp + server.py | Medium-High | **FULLY FIXED** — organiser-agent.cpp/.py side by pc-agent (20MB ceiling + real-file-size clamp, both `/preview` and `/read_file_b64`), server.py side (`pc_read_file_preview`) by lead in commit `7dc1695` (clamps to `_PC_PREVIEW_MAX_BYTES_CEILING` before forwarding). Verified both halves independently |
 | 5 | Secret comparison not constant-time | organiser-agent.cpp | Low | **FIXED by pc-agent** — see status update below |
 | 6 | SSH tunnel `StrictHostKeyChecking=no` | pc-tunnel@.service | Low | **FIXED by pc-agent** — see status update below |
 | 7 | Oversized request body silently truncated | organiser-agent.cpp | Medium | **FIXED by pc-agent** — see status update below |
@@ -168,21 +169,22 @@ command execution as the account running organiser-agent.
 
 ## 4. `/preview`'s `max_bytes` — unbounded, pre-allocated, chains through server.py
 
-> **organiser-agent.cpp side FIXED by pc-agent** (commit `86caa29`):
-> added a 20MB `MAX_READ_BYTES` hard ceiling to both `/preview` and
-> `/read_file_b64`, and clamp to the real file size (checked via
-> `fs::file_size` before allocating) rather than trusting the caller.
-> Verified live: `max_bytes=10000000000` against an 11-byte file now
-> returns a clean 200 with the correct clamped content instead of
-> crashing; process confirmed still responsive afterward. Applied the
+> **FULLY FIXED — both sides.** organiser-agent.cpp/.py side by pc-agent
+> (commit `86caa29`): added a 20MB `MAX_READ_BYTES` hard ceiling to both
+> `/preview` and `/read_file_b64`, and clamp to the real file size
+> (checked via `fs::file_size` before allocating) rather than trusting
+> the caller. Verified live: `max_bytes=10000000000` against an 11-byte
+> file now returns a clean 200 with the correct clamped content instead
+> of crashing; process confirmed still responsive afterward. Applied the
 > same clamp to organiser-agent.py's `/preview` and `/read_file_b64` for
 > consistency, even though Python's own failure mode differs.
-> **The server.py half of this finding — `pc_read_file_preview` forwarding
-> an unclamped `max_bytes` three layers deep — is NOT fixed.** That's
-> server.py, outside organiser-agent.cpp/.py; whoever owns server.py
-> should still clamp it there too (defense in depth: organiser-agent.cpp
-> being safe now doesn't mean every caller of it should rely solely on
-> that).
+> server.py's half (`pc_read_file_preview` forwarding `max_bytes`) was
+> separately fixed by lead in commit `7dc1695` — confirmed by reading
+> the actual code, not just trusting the broadcast: it now clamps to
+> `_PC_PREVIEW_MAX_BYTES_CEILING` before ever calling `/preview`, so even
+> a pre-fix organiser-agent build downstream would already be protected
+> from the server.py-tool-call direction (defense in depth now runs
+> both ways).
 
 organiser-agent.cpp's `h_preview`:
 
