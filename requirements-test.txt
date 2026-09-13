@@ -3,3 +3,15 @@
 # so a production deploy doesn't pull these in for no reason.
 pytest>=8.0
 pytest-asyncio>=0.24
+
+# tests/test_organiser_agent.py imports organiser-agent.py directly (to
+# test its Flask routes without needing a real running process) -- that
+# module hard-imports flask, so it's needed here too even though flask
+# is organiser-agent.py's runtime dependency, not server.py's. Without
+# it, pytest fails to even COLLECT that test file (a hard error, not a
+# graceful skip) and the whole run aborts.
+flask>=3.0
+# Optional at runtime in organiser-agent.py (falls back to a clear error
+# message if missing) -- included here so the delete-to-trash test path
+# actually exercises the real behavior instead of the fallback branch.
+send2trash>=1.8
