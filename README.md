@@ -102,6 +102,13 @@ The full, honest list lives in **`ARCHITECTURE.md`**. Highlights:
   cleanly rather than corrupting — organiser-agent's file API is
   text-only today).
 - No CI test/lint pipeline for `server.py` yet.
+- **A confirmed, still-open command-injection bug in organiser-agent's
+  `/run_command`** (via `working_dir`, Linux-confirmed) — found by
+  `agent/security-qa`. A related `max_bytes` DoS in organiser-agent's
+  `/preview` has a server-side clamp already in `main` (defense in
+  depth), but the underlying agent-side bug isn't fixed yet. See
+  ARCHITECTURE.md's "Confirmed security findings" section before
+  relying on either endpoint.
 
 ## Local testing
 
@@ -111,10 +118,14 @@ cp .secrets.example .secrets
 python server.py
 ```
 
-Run the existing tests:
+Run the test suite:
 
 ```bash
-python tests/test_admin_cookie_auth.py   # plain script, run directly
-pip install pytest && pytest tests/      # runs everything, including
-                                          # the fixture-based file_transfer tests
+pip install -r requirements-test.txt
+pytest tests/
 ```
+
+(`pytest.ini` sets `asyncio_mode = auto` — without it, every
+`@pytest.mark.asyncio` test fails with a misleading "async def
+functions are not natively supported" error rather than a clean pass,
+so don't drop that file.)
