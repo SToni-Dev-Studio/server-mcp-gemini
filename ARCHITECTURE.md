@@ -152,6 +152,11 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
 
 ## Known limitations
 
+> `write_codespace_file` used to always report success even when its
+> target directory didn't exist yet — fixed in commit `7dc1695` (it now
+> `mkdir -p`s the parent and checks for an explicit success marker). Not
+> listed below anymore since it's no longer true.
+
 - **organiser-agent.py lacks path protection.** Covered above — don't
   run it in production.
 - **`file_transfer`'s PC leg is text-only.** Covered above. (The underlying binary-safe agent endpoints now exist on `agent/pc-agent`, pending merge + server.py wiring — see "Pending: agent/pc-agent's fixes" below.)
@@ -174,17 +179,16 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
   equivalent to a real shell on that machine. This is a deliberate design
   choice, not a bug — but see the next item for a *specific, confirmed*
   vulnerability in how one of its arguments is handled, which is a bug.
-- **`write_codespace_file` doesn't verify its own write.** It always
-  reports success even if the target directory doesn't exist yet (the
-  underlying command has no `mkdir -p` and the tool doesn't check the
-  exec result). Create the parent directory first if it might be new.
 - **`create_git_commit_and_push` only stages already-tracked files**
   (`git add -u`) — brand-new untracked files need an explicit `git add`
   first.
-- **No CI test/lint step for `server.py` yet.** Only
-  `tests/test_admin_cookie_auth.py` and `tests/test_file_transfer.py`
-  exist today. See `coordination/status/hub-cicd.md` for whether a real
-  CI workflow has landed.
+- **No CI test/lint step for `server.py` yet** — the tests exist
+  (77 passing across 7 files under `tests/`, verified locally with
+  `pytest tests/` as of this writing) but nothing runs them
+  automatically on push/PR. `.github/workflows/release.yml` runs them
+  as part of a tagged release, which is a different thing (see its own
+  in-file note). See `coordination/status/hub-cicd.md` for whether a
+  real CI workflow has landed.
 - **Fly vs Render** — see above.
 - **No rate limiting** on the MCP bearer-token check beyond the
   constant-time comparison itself; a very determined attacker with
@@ -208,11 +212,15 @@ aren't easy to miss:
   equivalent Windows path is suspected but **unverified** (no Windows
   test target was available for that pass).
 - **`/preview`'s `max_bytes` is unbounded and pre-allocates before
-  checking the real file size**, causing a crash-the-process DoS —
-  confirmed, and it **chains straight through server.py**:
-  `pc_read_file_preview`'s `max_bytes` parameter is forwarded with no
-  clamping, so this is reachable from an ordinary MCP tool call, not
-  just from talking to the agent directly.
+  checking the real file size**, causing a crash-the-process DoS in
+  organiser-agent — confirmed. **Partially fixed**: `server.py`'s
+  `pc_read_file_preview` now clamps `max_bytes` to 2 MB server-side
+  (commit `7dc1695`), closing the path reachable from an ordinary MCP
+  tool call. The underlying bug — organiser-agent itself allocating
+  before checking the real file size — is **still open** at the agent
+  level; it's pc-agent's scope to fix for real, and the server-side
+  clamp is explicitly documented in-code as defense in depth, not a
+  substitute for that.
 - **organiser-agent's secret comparison isn't constant-time**, unlike
   `server.py`'s `hmac.compare_digest` everywhere else in this project —
   a timing side-channel on the PC-agent secret specifically.
@@ -222,10 +230,13 @@ aren't easy to miss:
   This is a silent-data-corruption bug, not just a size-limit gap.
 - **`pc-tunnel@.service` uses `StrictHostKeyChecking=no`** — a low-severity
   LAN MITM exposure.
-- **`file_transfer` has two silent-fallback footguns**: an empty PC name
-  silently resolves to `"default"` instead of erroring, and an unknown
-  `@account` suffix silently falls back to `"auto"` instead of erroring.
-  Neither corrupts anything, but both can mask a typo as if it worked.
+- ~~`file_transfer` has two silent-fallback footguns~~ — **fixed** in
+  commit `7dc1695`: an empty PC/codespace name now raises a clear error
+  at parse time instead of silently resolving to `"default"`, and
+  `_get_token` (used by every tool with an `account=` parameter, not
+  just `file_transfer`) now rejects any string outside
+  `{auto, primary, secondary, tertiary}` instead of silently treating it
+  the same as `"auto"`.
 - **`file_transfer`'s read side has no upfront size cap** — the write
   side enforces the 15 MB limit documented above, but an oversized
   *source* is fully read and base64-decoded before being rejected,
@@ -307,5 +318,6 @@ change once it's merged, not current behavior:
 | `Dockerfile`, `start.sh` | Container build/entrypoint for server.py |
 | `fly.toml` | Fly.io config (see "Deployment target" above) |
 | `.secrets.example` | Full list of every optional/required env var, for local runs |
-| `tests/` | `test_admin_cookie_auth.py` (plain script), `test_file_transfer.py` (pytest, uses fixtures — run with `pytest`, not `python <file>`) |
+| `tests/` | 7 files, 77 tests, run with `pytest tests/` (needs `requirements-test.txt` + `pytest.ini`'s `asyncio_mode = auto` — see below) |
+| `pytest.ini`, `requirements-test.txt` | Test-only deps + the asyncio-mode config every `@pytest.mark.asyncio` test needs — without both, several tests fail with a misleading error instead of a clean pass |
 | `coordination/` | Multi-agent build coordination — not part of the shipped product |
