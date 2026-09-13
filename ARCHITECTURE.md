@@ -172,7 +172,9 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
   intentionally close to unrestricted.** `server_run_command`'s blocklist
   is explicitly documented in-code as "a footgun-prevention nicety, not
   a real security boundary." Treat every `*_run_command` tool as
-  equivalent to a real shell on that machine.
+  equivalent to a real shell on that machine. This is a deliberate design
+  choice, not a bug — but see the next item for a *specific, confirmed*
+  vulnerability in how one of its arguments is handled, which is a bug.
 - **`write_codespace_file` doesn't verify its own write.** It always
   reports success even if the target directory doesn't exist yet (the
   underlying command has no `mkdir -p` and the tool doesn't check the
@@ -191,6 +193,60 @@ supported path until `coordination/status/hub-cicd.md` says otherwise.
 - **Admin dashboard is single-admin by design** — one shared password,
   one HMAC secret, no per-user accounts. Fine for personal
   infrastructure, not intended for multiple distinct admins.
+
+## Confirmed security findings (agent/security-qa)
+
+`agent/security-qa` has pushed real, independently-verified findings
+(not yet merged to `main` as of this writing — see
+`coordination/status/security-qa.md` and `SECURITY_FINDINGS.md` on that
+branch for full detail, severities, and suggested fixes). Summarizing
+the confirmed, actionable ones here so they aren't easy to miss:
+
+- **Command injection via `working_dir` in organiser-agent's
+  `/run_command`** (separate from, and worse than, the "intentionally
+  unrestricted by design" point above — this is an argument-handling
+  bug, not a design choice). Confirmed exploitable on Linux; the
+  equivalent Windows path is suspected but **unverified** (no Windows
+  test target was available for that pass).
+- **`/preview`'s `max_bytes` is unbounded and pre-allocates before
+  checking the real file size**, causing a crash-the-process DoS —
+  confirmed, and it **chains straight through server.py**:
+  `pc_read_file_preview`'s `max_bytes` parameter is forwarded with no
+  clamping, so this is reachable from an ordinary MCP tool call, not
+  just from talking to the agent directly.
+- **organiser-agent's secret comparison isn't constant-time**, unlike
+  `server.py`'s `hmac.compare_digest` everywhere else in this project —
+  a timing side-channel on the PC-agent secret specifically.
+- **Oversized request bodies to organiser-agent (>~64KB) are silently
+  truncated and still report success** — confirmed by sending a 200KB
+  body and getting a corrupted 65,333-byte file back with an HTTP 200.
+  This is a silent-data-corruption bug, not just a size-limit gap.
+- **`pc-tunnel@.service` uses `StrictHostKeyChecking=no`** — a low-severity
+  LAN MITM exposure.
+- **`file_transfer` has two silent-fallback footguns**: an empty PC name
+  silently resolves to `"default"` instead of erroring, and an unknown
+  `@account` suffix silently falls back to `"auto"` instead of erroring.
+  Neither corrupts anything, but both can mask a typo as if it worked.
+- **`file_transfer`'s read side has no upfront size cap** — the write
+  side enforces the 15 MB limit documented above, but an oversized
+  *source* is fully read and base64-decoded before being rejected,
+  rather than being rejected up front.
+
+Also worth knowing, as reassurance rather than a limitation: security-qa
+independently **verified** (not just re-asserted) this doc's claim that
+a binary file with a PC as either end of `file_transfer` fails cleanly
+rather than corrupting — they traced the actual mechanism (organiser-agent's
+raw binary response is invalid UTF-8, which the Linux-server hop's strict
+decode step catches and turns into a clean error before it ever reaches
+`server.py`). They also ran full adversarial fuzzing against the real MCP
+JSON-RPC wire protocol (malformed envelopes, wrong-type tool arguments,
+oversized/null-byte/unicode input) with no crashes or leaked internals,
+and confirmed a leaked session ID alone doesn't bypass the bearer-token
+check. One usability-only finding from that pass: the DNS-rebinding
+`allowed_hosts` check has no port wildcard, so a Host header with a port
+gets rejected even with the correct password — breaks routine local
+testing (fails closed, not a security bug, but worth knowing if `/mcp`
+seems to reject valid local requests).
 
 ## Where things live (quick map)
 

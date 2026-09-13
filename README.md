@@ -102,6 +102,12 @@ The full, honest list lives in **`ARCHITECTURE.md`**. Highlights:
   cleanly rather than corrupting — organiser-agent's file API is
   text-only today).
 - No CI test/lint pipeline for `server.py` yet.
+- **A confirmed command-injection bug in organiser-agent's
+  `/run_command`** (via `working_dir`, Linux-confirmed) and an unbounded
+  `max_bytes` DoS reachable through `pc_read_file_preview` — found by
+  `agent/security-qa`, not yet merged to `main`. See ARCHITECTURE.md's
+  "Confirmed security findings" section before relying on either
+  endpoint.
 
 ## Local testing
 
