@@ -135,16 +135,31 @@ def test_secret_gate_works_when_configured(agent_binary):
         assert status == 200, "correct secret should be accepted"
 
 
-def test_working_dir_command_injection(agent_binary, tmp_path):
-    """CONFIRMED EXPLOITABLE: the `working_dir` field is embedded into a
-    shell string as `cd "<working_dir>" && <command>` and then wrapped in
-    `/bin/bash -c '...'` with NO escaping of single quotes in
-    `working_dir`. A single quote breaks out of that wrapper entirely and
-    the remainder of working_dir is interpreted as new shell syntax --
-    independent of, and regardless of, whatever `command` contains.
+def test_working_dir_command_injection_FIXED(agent_binary, tmp_path):
+    """FIXED by agent/pc-agent (as a side effect of the run_command
+    timeout rewrite, not a conscious fix of this specific finding --
+    they rewrote run_command to use fork()+chdir()+execl() instead of
+    building a single `/bin/bash -c "cd <dir> && <cmd>"` string, which
+    incidentally means working_dir is never shell text at all anymore,
+    plus an explicit fs::is_directory() check rejects anything that
+    isn't a real existing directory before it's ever used).
 
-    This test proves it by injecting a `touch` via working_dir while
-    `command` is an inert echo, and checking the marker file exists.
+    Originally: the `working_dir` field was embedded into a shell string
+    as `cd "<working_dir>" && <command>`, wrapped in `/bin/bash -c
+    '...'`, with NO escaping of single quotes in `working_dir`. A single
+    quote broke out of that wrapper and the remainder of working_dir was
+    interpreted as new shell syntax, independent of `command`.
+
+    Lead re-verified this fix live (not just by reading the diff):
+    compiled this exact organiser-agent.cpp and re-ran this exact
+    payload by hand against the running binary before updating this
+    test -- see COMPETITION_REPORT.md for that verification.
+
+    This test now proves the FIX holds: the same payload that used to
+    plant a marker file must be rejected outright (organiser-agent
+    validates working_dir as a real directory before doing anything with
+    it, and a shell-injection payload string is never a real directory),
+    and the marker must NOT exist afterward.
     """
     marker = tmp_path / "PWNED_VIA_WORKING_DIR"
     assert not marker.exists()
@@ -154,12 +169,14 @@ def test_working_dir_command_injection(agent_binary, tmp_path):
             base, "/run_command",
             {"command": "echo should_not_matter", "working_dir": payload_working_dir},
         )
-        assert status == 200
-    assert marker.exists(), (
-        "working_dir shell-injection did not fire -- if this starts "
-        "failing because the bug was fixed, please update "
-        "SECURITY_FINDINGS.md to mark it remediated instead of just "
-        "deleting this test."
+        # Rejected as an invalid working_dir (it's not a real directory),
+        # never reaches a shell with the payload embedded in it.
+        assert status == 400, f"expected clean 400 rejection, got {status}: {body!r}"
+    assert not marker.exists(), (
+        "REGRESSION: working_dir shell-injection fired again -- the "
+        "fork/exec + fs::is_directory validation was removed or "
+        "bypassed. This is a HIGH-severity finding if it starts "
+        "failing again; see SECURITY_FINDINGS.md finding 1."
     )
 
 
