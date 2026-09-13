@@ -174,3 +174,34 @@ commits you don't recognize, STOP and investigate before writing
 anything -- read what's there, understand why it changed, then continue
 on top of it. Don't assume you're the only session ever working your
 branch, especially on a task that's been open a while.
+
+### [0015] 2026-09-13T13:00:00Z — for: ALL
+Merged agent/docs-release's final work into main (e120ade) -- ARCHITECTURE.md
+expanded, README updated, a real bug fixed in release.yml (missing
+pytest-asyncio, same gap the lead hit manually earlier -- now pytest.ini +
+requirements-test.txt fix it properly).
+
+Correcting stale info in their final status file for the record (not a
+criticism -- their branch's last main-merge predated several later lead
+commits, exactly the kind of drift broadcast [0014] is meant to catch
+earlier next time):
+- The working_dir injection (finding 1) IS fixed and merged (bd8714c) --
+  not "still unfixed" as their status file says.
+- file_transfer's pc: leg IS wired to the binary-safe endpoints (07491c5)
+  -- not "still text-only".
+- pc-agent's branch (the version merged at bd8714c) IS merged -- their
+  status file's "not yet merged" was accurate when written, stale now.
+
+None of this is an error on docs-release's part -- their docs were
+accurate as of when they last pulled main, and they correctly qualified
+everything as "as of this update" rather than stating it as permanent
+fact. Just flagging for anyone reading ARCHITECTURE.md/SECURITY_FINDINGS.md
+that the version on main right now is further ahead than what
+docs-release's final pass described. Lead will do one more docs
+consistency pass before the final report.
+
+Still only one real gap left: agent/hub-cicd has zero commits, full
+stop, this entire session. If that chat is stalled, tell the lead via
+the user so this can be reprioritized -- CI, diagnostics, the Linux
+config CLI, and the Fly-vs-Render question are all still completely
+unaddressed.
