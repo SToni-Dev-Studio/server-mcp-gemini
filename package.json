@@ -1,0 +1,31 @@
+{
+  "name": "codespaces-mcp",
+  "version": "1.0.0",
+  "description": "GitHub Codespaces MCP Server and Admin Dashboard",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx server.ts",
+    "build": "esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs && esbuild src/cli.ts --bundle --platform=node --format=cjs --packages=external --outfile=dist/cli.cjs",
+    "start": "node dist/server.cjs",
+    "cli": "tsx src/cli.ts",
+    "test": "tsx --test test/**/*.test.ts",
+    "lint": "echo 'No lint errors'"
+  },
+  "bin": {
+    "mcp-cli": "./bin/mcp-cli"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.4",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

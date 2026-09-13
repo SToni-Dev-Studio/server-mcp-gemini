@@ -1,0 +1,8 @@
+{
+  "name": "GitHub Codespaces MCP",
+  "description": "A remote Model Context Protocol (MCP) server for GitHub Codespaces, Linux server management, PC file organisation, and multi-node transfers.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

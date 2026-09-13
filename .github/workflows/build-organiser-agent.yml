@@ -1,0 +1,54 @@
+name: Build organiser-agent
+
+# Builds organiser-agent.exe with MSVC whenever the source changes, then
+# publishes it two ways so it's easy to grab:
+#   1. As a build artifact on the Actions run (kept for 30 days)
+#   2. As the asset on a rolling "latest" GitHub Release (stable download URL:
+#      https://github.com/<owner>/<repo>/releases/latest/download/organiser-agent.exe)
+#
+# Can also be run manually from the Actions tab (workflow_dispatch).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "organiser-agent.cpp"
+      - ".github/workflows/build-organiser-agent.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write   # needed to publish/update the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up MSVC developer environment
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Build organiser-agent.exe
+        shell: cmd
+        run: cl /EHsc /O2 /std:c++17 organiser-agent.cpp /Fe:organiser-agent.exe
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: organiser-agent-${{ github.sha }}
+          path: organiser-agent.exe
+          retention-days: 30
+
+      - name: Publish to rolling "latest" release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "organiser-agent (latest build)"
+          body: |
+            Auto-built from commit ${{ github.sha }} by the build-organiser-agent workflow.
+            Download `organiser-agent.exe` below and drop it into
+            `C:\Program Files\OrganiserAgent\` per BUILD_AND_SETUP.md.
+          prerelease: true
+          files: organiser-agent.exe

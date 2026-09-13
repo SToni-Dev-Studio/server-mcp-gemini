@@ -1,0 +1,15 @@
+#!/usr/bin/env node
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const cjsPath = path.resolve(__dirname, "../dist/cli.cjs");
+const require = createRequire(import.meta.url);
+
+if (fs.existsSync(cjsPath)) {
+  require(cjsPath);
+} else {
+  import("../src/cli.ts");
+}
