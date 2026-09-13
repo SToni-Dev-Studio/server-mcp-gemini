@@ -24,6 +24,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import contextlib
 import urllib.request
@@ -60,10 +61,18 @@ def _free_port():
 
 @contextlib.contextmanager
 def running_agent(binary, secret=None, extra_env=None):
+    """IMPORTANT: organiser-agent persists machine identity/secret to a
+    fixed, per-OS-user path ($HOME/.config/organiser-agent/machine.json
+    on Linux -- see finding 20 in SECURITY_FINDINGS.md). Every invocation
+    here gets its own isolated $HOME so tests never leak state into each
+    other or into whatever real $HOME this sandbox happens to have."""
     port = _free_port()
+    isolated_home = tempfile.mkdtemp(prefix="organiser-agent-test-home-")
     env = os.environ.copy()
     env.pop("ORGANISER_SECRET", None)
     env["ORGANISER_PORT"] = str(port)
+    env["HOME"] = isolated_home
+    env["XDG_CONFIG_HOME"] = os.path.join(isolated_home, ".config")
     if secret is not None:
         env["ORGANISER_SECRET"] = secret
     if extra_env:
@@ -90,6 +99,7 @@ def running_agent(binary, secret=None, extra_env=None):
     finally:
         proc.kill()
         proc.wait(timeout=5)
+        shutil.rmtree(isolated_home, ignore_errors=True)
 
 
 def _get(base, path, headers=None):
@@ -213,3 +223,59 @@ def test_preview_of_binary_file_returns_invalid_utf8_over_the_wire(agent_binary,
         assert status == 200
         with pytest.raises(UnicodeDecodeError):
             body.decode("utf-8")
+
+
+def test_unauthenticated_config_post_can_permanently_hijack_the_machine(agent_binary, tmp_path):
+    """NEW finding (this session, against pc-agent's newly-added /config
+    endpoint): when no ORGANISER_SECRET is configured (the same
+    documented-open window as test_no_secret_configured_leaves_endpoints_open),
+    POST /config lets ANY unauthenticated caller set a brand new secret.
+    This is a meaningfully worse variant of that already-known finding:
+    it's not just "anyone can run one-off commands during this window" --
+    it's "anyone can PERSISTENTLY seize exclusive control and lock out
+    the legitimate owner", since the new secret is saved to disk and
+    survives a restart (unless ORGANISER_SECRET is set via environment
+    variable, which always takes precedence and is unaffected by this).
+
+    Confirmed end-to-end: an attacker with zero credentials sets a new
+    secret, and the legitimate owner (who never had a secret to begin
+    with) is immediately locked out of every endpoint, including the
+    would-be recovery path (POST /config itself)."""
+    with running_agent(agent_binary, secret=None) as (base, _):
+        # confirm the open baseline
+        status, _ = _get(base, "/status")
+        assert status == 200
+
+        # attacker, holding no credentials at all, sets their own secret
+        status, body = _post(base, "/config", {"secret": "attacker-chosen-secret"})
+        assert status == 200
+        assert b"secret_set" in body
+
+        # the legitimate owner (still presenting no credentials, exactly
+        # as they always could before) is now locked out
+        status, _ = _get(base, "/status")
+        assert status == 401, (
+            "if this now returns 200, the hijack either didn't take "
+            "effect or was mitigated -- update SECURITY_FINDINGS.md "
+            "finding 20 accordingly rather than just adjusting this test"
+        )
+
+        # the attacker's secret works
+        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "attacker-chosen-secret"})
+        assert status == 200
+
+        # the "recovery" path is itself gated behind the attacker's new
+        # secret -- the legitimate owner has no way back in over the
+        # network at all
+        status, _ = _post(base, "/config", {"secret": ""})
+        assert status == 401
+
+
+def test_config_endpoint_never_leaks_the_actual_secret_value(agent_binary):
+    """Positive check: GET /config must report whether a secret is set
+    and where it came from, but never the secret's actual value."""
+    with running_agent(agent_binary, secret="s3cr3t-value-should-not-leak") as (base, _):
+        status, body = _get(base, "/config", headers={"X-Organiser-Secret": "s3cr3t-value-should-not-leak"})
+        assert status == 200
+        assert b"s3cr3t-value-should-not-leak" not in body
+        assert b"secret_set" in body

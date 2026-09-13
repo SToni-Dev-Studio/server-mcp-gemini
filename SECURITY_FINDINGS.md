@@ -37,6 +37,8 @@ writing (`python3 -m pytest tests/ -v`).
 | 17 | MCP wire-protocol fuzzing (malformed JSON-RPC, wrong tool-arg types, oversized/null-byte/unicode args) | server.py + mcp SDK | — | **No issues found** — thorough fuzzing, clean result |
 | 18 | `mkdir -p $(dirname ...)` word-splits on paths with spaces — write fails, creates wrong garbage dirs | server.py (3 call sites) | Low-Medium (reliability, not access) | Confirmed, fix verified |
 | 19 | Independent re-verification of lead's 4 fixes (commit 7dc1695) | server.py | — | **All 4 confirmed sound** |
+| 20 | Unauthenticated `/config` POST can PERMANENTLY hijack a PC agent (both implementations) | organiser-agent.cpp + organiser-agent.py | **High** | Confirmed, both implementations, design-level |
+| 21 | `working_dir` injection re-verified fixed (pc-agent's rewrite) | organiser-agent.cpp | — | **Confirmed fixed**, exploit closed, legit use unaffected |
 
 ---
 
@@ -592,3 +594,142 @@ which do pass) were sufficient:
 
 **Conclusion: all 4 fixes hold up under independent re-verification.**
 No regressions found in this round of double-checking.
+
+
+## 20. Unauthenticated `/config` POST can PERMANENTLY hijack a PC agent — both implementations
+
+pc-agent added an in-exe local config dashboard (per broadcast [0006]) to
+both `organiser-agent.cpp` and the separate, parallel `organiser-agent.py`
+(Flask) implementation, so the machine name and secret can be managed from
+a browser instead of hand-editing a file over SSH/RDP. Both implementations
+share the same auth pattern:
+
+```cpp
+// C++
+if (!g_secret.empty() && req.path != "/admin") { /* check X-Organiser-Secret */ }
+```
+```python
+# Flask
+def _check_auth():
+    if not SECRET:
+        return
+    if request.headers.get("X-Organiser-Secret", "") != SECRET:
+        abort(401, "Unauthorized")
+```
+
+This is the same "no secret configured → check is skipped entirely"
+pattern as finding 3 — but finding 3 was about one-off operations
+(`/run_command`, file read/write) during an exposure *window*. **`/config`
+turns that same window into a permanent takeover**, because it lets the
+caller — including one with zero credentials, during that window — *set
+a brand-new secret*, which is persisted to disk and survives a restart.
+
+**Confirmed dynamically, end-to-end, against BOTH implementations
+independently** (real compiled C++ binary over real HTTP;
+Flask's own test client for the Python version):
+
+1. No secret configured → `/status` (and everything else) is open, as
+   documented.
+2. An attacker with **zero credentials** — no header, nothing — POSTs
+   `{"secret": "attacker-chosen-secret"}` to `/config`. **Succeeds
+   (`200 OK`)** in both implementations.
+3. The legitimate owner, presenting exactly the same "no credentials"
+   they always had (since none were ever configured), now gets a clean
+   `401` on *every* endpoint, including `/config` itself.
+4. The attacker's chosen secret works.
+5. There is **no network-based recovery path** — the owner's only way
+   back in is local/physical access to edit or delete the persisted
+   config file directly.
+
+**This is a meaningfully worse variant than finding 3**, not just a
+duplicate of it: finding 3 describes a transient exposure ("anyone
+nearby can run a command while this is unconfigured"); finding 20 is a
+**ratchet** — a single moment of exposure converts into **permanent,
+exclusive attacker control**, because the takeover is written to disk
+and reloaded on every future start (unless `ORGANISER_SECRET` is set via
+environment variable, which always takes precedence over the file and
+is the one deployment mode this doesn't affect).
+
+**Concrete persistence detail confirmed:** the config file lives at a
+fixed, well-known, per-OS-user path — `$HOME/.config/organiser-agent/machine.json`
+on Linux/Mac (`$XDG_CONFIG_HOME` if set), `%APPDATA%\organiser-agent\machine.json`
+on Windows — and stores the secret in **plaintext JSON**:
+```json
+{"machine_id":"...","machine_name":"","secret":"attacker-chosen-secret-12345"}
+```
+Plaintext local storage of a locally-scoped secret is standard practice
+and not itself a separate finding, but it's included here for anyone
+doing incident response: this is exactly where to look, and exactly
+what to expect to find.
+
+**This is a design-level gap, not a one-off coding mistake** — it was
+independently written into two completely separate codebases (C++ and
+Python/Flask) by the same reasonable "no secret configured → stay
+open" logic applied uniformly to a *new* endpoint that has a
+fundamentally different risk profile (rotating/setting credentials)
+than the *existing* endpoints that logic was originally designed for
+(one-off file/command operations). That's worth calling out clearly
+since fixing one implementation without recognizing the pattern would
+very plausibly leave the other one — or any future third
+implementation — exposed the same way.
+
+**Suggested fix directions** (a genuine product decision, not mine to
+make unilaterally — flagging trade-offs rather than prescribing one):
+- Simplest: never allow `/config` to *set an initial* secret over the
+  network at all. Require the first secret to come from the environment
+  variable or a local file edit; once *any* secret exists, `/config` can
+  be used to *rotate* it (still gated behind the existing secret, so this
+  doesn't regress the no-secret-configured case into "can never be
+  configured remotely at all" for legitimate first-time setup — it just
+  means first-time setup needs one local step).
+- Alternative: auto-generate a strong random secret on first run if none
+  is configured (print it once, to the console/log), rather than leaving
+  a wide-open "anyone can claim this" window at all.
+- Weakest but cheapest: time-box the unconfigured window (e.g., only
+  accept a `/config` secret-set within N seconds of process start), which
+  reduces but does not eliminate the race against a legitimate first-time
+  setup.
+
+Regression tests:
+`tests/test_organiser_agent_security.py::test_unauthenticated_config_post_can_permanently_hijack_the_machine`
+(C++) and
+`tests/test_organiser_agent_flask_security.py::test_unauthenticated_config_post_can_hijack_flask_agent_too`
+(Flask) — both designed to start failing (not silently pass) if either
+implementation's behavior changes, per the standing convention in this
+file.
+
+## 21. `working_dir` command injection (finding 1) — re-verified fixed
+
+pc-agent rewrote `run_command` in `organiser-agent.cpp` (as a side effect
+of a `run_command` timeout fix, not a conscious response to this specific
+finding — see their commit message) to use `fork()` + `chdir()` +
+`execl()` on POSIX and `CreateProcess`'s native `lpCurrentDirectory`
+parameter on Windows, instead of building a `cd "<dir>" && <cmd>` shell
+string. This means `working_dir` is **never shell text at all anymore**
+on either platform, closing the injection at the root rather than adding
+escaping to the old approach. An explicit `fs::is_directory()` (or
+equivalent) check also now rejects anything that isn't a real, existing
+directory before it's used at all.
+
+**Re-verified independently** (not just by reading the diff or trusting
+the lead's own re-verification, which they also did separately and noted
+in `COMPETITION_REPORT.md`): rebuilt the exact current `organiser-agent.cpp`
+from `main` for Linux, and re-ran the **exact same payload** that
+originally worked (`working_dir: "x' ; touch <marker> ; echo '"`):
+
+- Now rejected cleanly with `400` and a specific, honest error
+  (`"working_dir does not exist or is not a directory: x' ; touch ..."`)
+  — the payload is correctly treated as a literal (non-existent)
+  directory name, never as shell syntax.
+- No marker file created.
+- **Legitimate use still works**: a real directory as `working_dir`
+  correctly changes the command's working directory (`ls -la` inside a
+  test directory listed exactly that directory's contents).
+- Process remained stable throughout.
+
+**Conclusion: this fix is complete and correctly implemented on both
+platforms** (Windows re-checked via code review only, consistent with
+every other Windows-specific claim in this document — I don't have a
+Windows target to run it on, but the `lpCurrentDirectory` approach is the
+correct native primitive and structurally can't reintroduce the same bug
+class the way string concatenation could).

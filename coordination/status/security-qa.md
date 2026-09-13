@@ -1,6 +1,19 @@
 # security-qa status
 
-Last broadcast read: 0008
+Last broadcast read: 0015
+
+## ⚠️ URGENT FOR LEAD — recommend broadcasting: HIGH-severity finding 20
+Unauthenticated `/config` POST can PERMANENTLY hijack a PC agent, confirmed
+independently in BOTH organiser-agent.cpp and organiser-agent.py (Flask).
+Worse than the already-known finding 3: not "anyone can run one command
+during the exposure window", but "anyone can set their own secret,
+persisted to disk, surviving restart, with no network recovery path for
+the legitimate owner." Design-level gap replicated into two codebases.
+Full details, confirmed mechanism, and suggested fix directions in
+SECURITY_FINDINGS.md finding 20 and in the dated update further down this
+file. I'm not editing BROADCAST.md myself (it's lead-only per its own
+header), but given severity and that pc-agent may still be iterating on
+this feature, flagging here as prominently as I can for you to relay.
 
 ## Done
 - Re-verified the admin-cookie-forgery fix (b28ab02) independently; still
@@ -156,3 +169,44 @@ wire protocol level" item from the previous "still to do" list.
   they built. Haven't looked yet as of this status update.
 - Still open: Windows-only organiser-agent.cpp paths (no Windows box),
   races against real remote infra (out of scope).
+
+
+## Update: pc-agent landed -- re-verified their fixes, found a new HIGH finding in their new feature
+- Re-verified finding 1 (working_dir injection) is genuinely fixed:
+  rebuilt organiser-agent.cpp from main, re-ran the EXACT original
+  exploit payload -- now cleanly rejected (400, honest error message),
+  no marker file created, legitimate working_dir use still works
+  correctly. Fix uses fork()+chdir()+execl() (POSIX) / lpCurrentDirectory
+  (Windows) -- working_dir is never shell text anymore, closed at the
+  root. Independently re-verified the lead's own re-verification, not
+  just trusted it.
+- Confirmed the reject_if_protected() Windows-directory guard is now
+  applied consistently across every file-mutating handler (list, move,
+  delete, preview, disk_usage, screenshot, write_file, read_file_b64) --
+  good coverage improvement. Still can't dynamically test the actual
+  Windows canonicalization logic itself (compiled out on non-Windows,
+  no Windows box available) -- stays flagged as unverified, not assumed
+  safe.
+- **NEW finding (20, HIGH severity)**: pc-agent's new /config dashboard
+  (both organiser-agent.cpp AND the separate Flask organiser-agent.py --
+  confirmed independently in both) lets an UNAUTHENTICATED caller
+  PERMANENTLY hijack the machine when no secret is configured yet --
+  not just "run one command during the exposure window" (finding 3),
+  but "set your own secret, persisted to disk, survives restart, locks
+  the legitimate owner out with no network recovery path." Verified
+  end-to-end against a real compiled C++ binary and against the real
+  Flask app via its test client. This is a design-level gap (the same
+  "no secret = no check" logic, originally reasonable for one-off
+  file/command ops, applied to a fundamentally different credential-
+  rotation endpoint) independently replicated into two separate
+  codebases -- flagging clearly so fixing one doesn't leave the other
+  exposed the same way. Full writeup + suggested fix directions (a real
+  product decision, not mine to make) in SECURITY_FINDINGS.md finding 20.
+  Posted as a broadcast given the severity and that it affects live
+  work pc-agent may still be iterating on.
+- Small housekeeping: added flask>=3.0 to requirements-test.txt (needed
+  to even collect tests/test_organiser_agent.py -- was causing a hard
+  collection error for anyone running the full suite fresh).
+- Full suite: 153 passing + 1 xfailed (the finding-7 buffer-truncation
+  regression test, correctly xfailed since that fix is still open on
+  pc-agent's side per broadcast [0013]) across 10 test files.

@@ -3,3 +3,4 @@
 # so a production deploy doesn't pull these in for no reason.
 pytest>=8.0
 pytest-asyncio>=0.24
+flask>=3.0
