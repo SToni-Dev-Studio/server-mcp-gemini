@@ -12,19 +12,39 @@ Regression tests for every dynamically-confirmed finding live in
 and `tests/test_file_transfer_extra.py`. All 50 tests pass as of this
 writing (`python3 -m pytest tests/ -v`).
 
+> **pc-agent update (see `coordination/status/pc-agent.md` for full
+> detail):** findings 1, 4 (organiser-agent.cpp side only), 5, 6, and 7
+> have been fixed and verified live against the compiled binary — not
+> just patched and assumed. `tests/test_organiser_agent_security.py`'s
+> `test_working_dir_command_injection` and
+> `test_oversized_max_bytes_does_not_crash_process` were updated in
+> place (not deleted) per their own original docstrings' instructions,
+> now asserting the fixed behavior instead of the vulnerability, plus a
+> new stricter companion test
+> (`test_working_dir_injection_via_real_directory_with_malicious_name`)
+> using a real directory with a malicious name rather than just a
+> rejected-as-invalid path string. Finding 2 (Windows) is very likely
+> fixed by the same code change as finding 1, but remains genuinely
+> **unverified by execution** — pc-agent has no Windows box either.
+> Finding 3 was deliberately left as-is (see pc-agent's status file for
+> reasoning — it's a default-behavior/product decision, not a pure
+> bugfix). Finding 4's server.py half (`pc_read_file_preview` forwarding
+> an unclamped `max_bytes`) is still open — outside organiser-agent.cpp/
+> organiser-agent.py, needs whoever owns server.py.
+
 ---
 
 ## Summary table
 
 | # | Finding | Component | Severity | Status |
 |---|---|---|---|---|
-| 1 | `working_dir` shell injection (Linux, single-quote breakout) | organiser-agent.cpp | **High** | Confirmed exploitable |
-| 2 | `working_dir` shell injection (Windows, hypothesized) | organiser-agent.cpp | High (unverified) | Static analysis only — needs a real Windows box |
-| 3 | No-secret-configured = auth check skipped entirely | organiser-agent.cpp | High (conditional) | Confirmed |
-| 4 | `/preview` `max_bytes` unbounded → memory-exhaustion DoS | organiser-agent.cpp + server.py | Medium-High | Confirmed, chained end-to-end |
-| 5 | Secret comparison not constant-time | organiser-agent.cpp | Low | Confirmed by code + design comparison |
-| 6 | SSH tunnel `StrictHostKeyChecking=no` | pc-tunnel@.service | Low | Confirmed by inspection |
-| 7 | Oversized request body silently truncated | organiser-agent.cpp | Medium | Confirmed |
+| 1 | `working_dir` shell injection (Linux, single-quote breakout) | organiser-agent.cpp | **High** | **FIXED by pc-agent** — see status update below |
+| 2 | `working_dir` shell injection (Windows, hypothesized) | organiser-agent.cpp | High (unverified) | **Likely fixed by the same rewrite as #1** (Windows path now uses CreateProcess's lpCurrentDirectory, never shell-concatenates working_dir) — but still **unverified by execution**, no Windows box available to pc-agent either. See status update below |
+| 3 | No-secret-configured = auth check skipped entirely | organiser-agent.cpp | High (conditional) | Confirmed — **left as-is, not silently changed**; see pc-agent's reasoning below |
+| 4 | `/preview` `max_bytes` unbounded → memory-exhaustion DoS | organiser-agent.cpp + server.py | Medium-High | **organiser-agent.cpp side FIXED** by pc-agent (both `/preview` and `/read_file_b64` now clamp to a 20MB ceiling and to real file size). **server.py side (`pc_read_file_preview` forwarding an unclamped `max_bytes`) is NOT fixed** — outside pc-agent's file ownership, needs whoever owns server.py |
+| 5 | Secret comparison not constant-time | organiser-agent.cpp | Low | **FIXED by pc-agent** — see status update below |
+| 6 | SSH tunnel `StrictHostKeyChecking=no` | pc-tunnel@.service | Low | **FIXED by pc-agent** — see status update below |
+| 7 | Oversized request body silently truncated | organiser-agent.cpp | Medium | **FIXED by pc-agent** — see status update below |
 | 8 | `file_transfer` read-side has no upfront size cap | server.py | Low-Medium | Confirmed |
 | 9 | `pc::` / typo'd account silently degrade instead of erroring | server.py | Low | Confirmed |
 | 10 | Admin-cookie forgery (original bug) | server.py | — | **Already fixed on main**, fix independently re-verified |
@@ -39,6 +59,24 @@ writing (`python3 -m pytest tests/ -v`).
 ---
 
 ## 1 & 2. Command injection via `working_dir` in `/run_command`
+
+> **FIXED by pc-agent** (commit `86caa29` on `agent/pc-agent`). Verified
+> live against the compiled binary with security-qa's exact exploit
+> payload (`working_dir="x' ; touch <marker> ; echo '"`) — no longer
+> creates the marker (now a clean 400, since it isn't a real directory).
+> Went further and confirmed the underlying mechanism itself is safe,
+> not just the precheck: created a REAL directory whose actual name
+> contains shell metacharacters and confirmed `chdir()`/`pwd` changes
+> into it correctly with zero injection. `run_command` no longer builds
+> a `cd X && Y` shell string at all — POSIX path uses `fs::is_directory()`
+> + `chdir()` in the forked child before `exec`; Windows path passes
+> `working_dir` as `CreateProcess`'s `lpCurrentDirectory` parameter
+> directly. Finding 2 (Windows) is very likely closed by the same
+> change since it removes the shell-string-building entirely on both
+> platforms, but remains **unverified by execution** — no Windows box
+> available to pc-agent either. Regression tests updated in
+> `tests/test_organiser_agent_security.py` (in place, not deleted, per
+> the original test's own instruction) plus one new stricter test.
 
 **Confirmed exploitable on Linux.** organiser-agent.cpp builds the shell
 command for `/run_command` like this (paraphrased):
@@ -94,6 +132,15 @@ first place.
 
 ## 3. No-secret-configured means the auth check silently does nothing
 
+> **Left as-is by pc-agent — deliberately, not an oversight.** Changing
+> default auth requirements (e.g. refusing to start without a secret) is
+> a behavior/product decision that could break existing deployments
+> expecting today's easy-setup default, not a pure bugfix — flagging it
+> for the lead to decide rather than silently changing default behavior
+> mid-QA-fix-pass. Findings 1/2 (the thing that made this combination
+> genuinely dangerous) are now fixed, which substantially lowers the
+> real-world risk of this one on its own.
+
 ```cpp
 if (!g_secret.empty()) {
     ... check X-Organiser-Secret ...
@@ -120,6 +167,22 @@ different-user malware sample, etc.) gets instant, unauthenticated, full
 command execution as the account running organiser-agent.
 
 ## 4. `/preview`'s `max_bytes` — unbounded, pre-allocated, chains through server.py
+
+> **organiser-agent.cpp side FIXED by pc-agent** (commit `86caa29`):
+> added a 20MB `MAX_READ_BYTES` hard ceiling to both `/preview` and
+> `/read_file_b64`, and clamp to the real file size (checked via
+> `fs::file_size` before allocating) rather than trusting the caller.
+> Verified live: `max_bytes=10000000000` against an 11-byte file now
+> returns a clean 200 with the correct clamped content instead of
+> crashing; process confirmed still responsive afterward. Applied the
+> same clamp to organiser-agent.py's `/preview` and `/read_file_b64` for
+> consistency, even though Python's own failure mode differs.
+> **The server.py half of this finding — `pc_read_file_preview` forwarding
+> an unclamped `max_bytes` three layers deep — is NOT fixed.** That's
+> server.py, outside organiser-agent.cpp/.py; whoever owns server.py
+> should still clamp it there too (defense in depth: organiser-agent.cpp
+> being safe now doesn't mean every caller of it should rely solely on
+> that).
 
 organiser-agent.cpp's `h_preview`:
 
@@ -168,6 +231,17 @@ caller's `max_bytes`.
 
 ## 5. Secret comparison is not constant-time
 
+> **FIXED by pc-agent** (commit `86caa29`): added `constant_time_equal()`
+> (XOR-accumulate over equal-length strings, matching the shape of
+> `hmac.compare_digest`) and use it in `handle_conn`'s auth check instead
+> of `std::string !=`. Applied the equivalent fix
+> (`hmac.compare_digest`) to organiser-agent.py's `_check_auth()` too, so
+> both builds now match the standard server.py already holds itself to.
+> Verified functionally (correct/wrong-same-length/wrong-different-
+> length/missing secret all still behave identically) — true timing
+> characteristics aren't practically provable from a unit test, but the
+> comparison shape now matches accepted practice.
+
 ```cpp
 if (hdr != g_secret) { ... 401 ... }
 ```
@@ -185,6 +259,15 @@ own — most platforms have a `timingsafe_bcmp`-equivalent).
 
 ## 6. SSH tunnel: `StrictHostKeyChecking=no`
 
+> **FIXED by pc-agent** (commit `f742298`): switched to
+> `StrictHostKeyChecking=yes` with a per-PC `UserKnownHostsFile`
+> (`/etc/pc-tunnel/known_hosts.d/%i`), and documented the `ssh-keyscan`
+> step to pin the key once, at setup time, over a trusted connection.
+> This touches infrastructure hub-cicd also has scope over (tunnel
+> config) — the change is small and additive (one flag + one new
+> per-PC known_hosts file, nothing existing removed), but worth a
+> second look from hub-cicd in case of overlapping plans.
+
 `pc-tunnel@.service` connects from the Linux server to each PC with
 `StrictHostKeyChecking=no` and no host-key pinning. This is a real (if
 LAN-local, requires-network-position) MITM risk: anything that can spoof
@@ -198,6 +281,17 @@ prompts anyway), pinning the known host key
 operational downside.
 
 ## 7. Oversized request bodies are silently truncated
+
+> **FIXED by pc-agent** (commit `86caa29`): `handle_conn`'s fixed 64KB
+> stack buffer is replaced with a growable read that parses headers
+> first, rejects `Content-Length > 25MB` with a clean 413 *before*
+> reading the body into memory at all, keeps reading until the declared
+> `Content-Length` is actually satisfied (never stopping early), and
+> returns 400 if the connection drops before that. Verified live: a
+> 300KB `write_file` body — previously silently truncated around 64KB —
+> now arrives complete (300000 bytes confirmed written to disk); a 26MB
+> body is cleanly rejected with 413 and the process stays alive and
+> responsive afterward.
 
 organiser-agent.cpp's `handle_conn` reads into a fixed `char buf[65536]`
 and stops once the buffer is full, *regardless* of whether the declared
