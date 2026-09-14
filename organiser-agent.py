@@ -37,6 +37,7 @@ Usage
 """
 
 import hashlib
+import hmac
 import json
 import os
 import platform
@@ -54,8 +55,16 @@ try:
 except ImportError:
     HAS_TRASH = False
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 PORT = int(os.environ.get("ORGANISER_PORT", 7842))
+# Hard ceiling for any single-file read (/preview, /read_file_b64),
+# regardless of what a caller's max_bytes asks for. Python's own
+# MemoryError-on-huge-read failure mode differs from the C++ build's
+# std::bad_alloc, but the same defense-in-depth applies: never trust a
+# caller-supplied size unclamped, and never allocate more than the file
+# actually contains (see SECURITY_FINDINGS.md finding 4, found against
+# organiser-agent.cpp — applying the same fix here for consistency).
+MAX_READ_BYTES = 20 * 1024 * 1024
 # SECRET and MACHINE_NAME are resolved further down, after the machine
 # registry/config-file plumbing they depend on (env var > config file >
 # default). Referencing them at call time inside route handlers is fine
@@ -71,7 +80,11 @@ app = Flask(__name__)
 def _check_auth():
     if not SECRET:
         return
-    if request.headers.get("X-Organiser-Secret", "") != SECRET:
+    # Constant-time comparison (mirrors organiser-agent.cpp's fix for
+    # SECURITY_FINDINGS.md finding 5 — plain string != is a timing side
+    # channel; server.py already uses hmac.compare_digest for exactly
+    # this reason elsewhere in this project).
+    if not hmac.compare_digest(request.headers.get("X-Organiser-Secret", ""), SECRET):
         abort(401, "Unauthorized")
 
 
@@ -325,7 +338,7 @@ def delete_file():
 def preview_file():
     _check_auth()
     path = Path(request.args.get("path", "")).expanduser()
-    max_bytes = int(request.args.get("max_bytes", 4096))
+    requested = int(request.args.get("max_bytes", 4096))
 
     blocked = _reject_if_protected(path)
     if blocked:
@@ -335,6 +348,7 @@ def preview_file():
     if not path.is_file():
         return jsonify({"error": "Not a file"}), 400
 
+    max_bytes = min(max(requested, 0), MAX_READ_BYTES)
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             content = f.read(max_bytes)
@@ -569,7 +583,7 @@ def read_file_b64():
     _check_auth()
     import base64
     path = Path(request.args.get("path", "")).expanduser()
-    max_bytes = int(request.args.get("max_bytes", 10 * 1024 * 1024))  # 10MB default cap
+    requested = int(request.args.get("max_bytes", 10 * 1024 * 1024))  # 10MB default
 
     blocked = _reject_if_protected(path)
     if blocked:
@@ -579,6 +593,7 @@ def read_file_b64():
     if not path.is_file():
         return jsonify({"error": "Not a file"}), 400
 
+    max_bytes = min(max(requested, 0), MAX_READ_BYTES)
     try:
         size = path.stat().st_size
         with open(path, "rb") as f:

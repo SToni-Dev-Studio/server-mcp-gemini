@@ -1060,16 +1060,21 @@ async def pc__screenshot(save_path: str = "", pc: str = "default") -> str:
 
 _FILE_TRANSFER_MAX_BYTES = 15 * 1024 * 1024  # 15 MB, pre-base64
 
-# organiser-agent.cpp's handle_conn reads HTTP requests into a fixed
-# 65536-byte buffer and silently truncates anything larger -- reporting
-# HTTP 200 success on the truncated write regardless (SECURITY_FINDINGS.md
-# finding 7, confirmed independently by lead while wiring this up: a
-# 128,000-byte test payload silently landed on disk as 48,981 bytes).
-# Until that's fixed in organiser-agent.cpp, file_transfer enforces a much
-# lower cap specifically for the pc: leg -- shipping the full 15MB cap
-# while knowing anything over ~48KB silently corrupts would make this
-# tool actively unsafe to trust for PC transfers.
-_PC_TRANSFER_SAFE_MAX_BYTES = 40_000  # raw bytes, pre-base64; conservative margin under the 64KB buffer incl. JSON/base64 overhead
+# organiser-agent.cpp's handle_conn previously read HTTP requests into a
+# fixed 65536-byte buffer and silently truncated anything larger --
+# reporting HTTP 200 success on the truncated write regardless
+# (SECURITY_FINDINGS.md finding 7, confirmed independently by lead while
+# wiring this up: a 128,000-byte test payload silently landed on disk as
+# 48,981 bytes). pc-agent fixed this with a proper Content-Length-aware
+# growable read loop (agent/pc-agent commit 86caa29, merged into main) --
+# verified by re-running the exact 128,000-byte payload that originally
+# exposed the bug: it now arrives complete (128,000 of 128,000 bytes) and
+# an oversized (>25MB) body is cleanly rejected with 413 rather than
+# silently truncated. See tests/test_file_transfer_pc_e2e.py's
+# test_organiser_agent_no_longer_has_the_64kb_truncation_bug.
+# The pc: leg's cap can now match the general _FILE_TRANSFER_MAX_BYTES
+# cap rather than staying artificially low.
+_PC_TRANSFER_SAFE_MAX_BYTES = _FILE_TRANSFER_MAX_BYTES  # raw bytes, pre-base64 -- matches the general cap now that finding 7 is fixed
 
 
 def _parse_location(loc: str) -> tuple[str, str, str]:
@@ -1167,16 +1172,14 @@ async def _location_write_bytes(loc: str, data: bytes) -> str:
         # /write_file (see coordination/status/pc-agent.md, broadcast
         # [0006]) -- always sent as base64 now, text or binary alike, so
         # there's no encoding-mismatch failure mode to special-case here.
-        # Capped well below _FILE_TRANSFER_MAX_BYTES -- see the comment
-        # on _PC_TRANSFER_SAFE_MAX_BYTES above (organiser-agent silently
-        # truncates larger requests instead of erroring).
+        # Cap now matches _FILE_TRANSFER_MAX_BYTES -- see the comment on
+        # _PC_TRANSFER_SAFE_MAX_BYTES above (finding 7 is fixed; this
+        # check just keeps the pc: leg consistent with every other kind
+        # rather than being load-bearing for safety anymore).
         if len(data) > _PC_TRANSFER_SAFE_MAX_BYTES:
             raise ValueError(
                 f"File is {len(data)} bytes -- pc: transfers are capped at "
-                f"{_PC_TRANSFER_SAFE_MAX_BYTES} bytes until SECURITY_FINDINGS.md "
-                f"finding 7 (organiser-agent's fixed-size request buffer silently "
-                f"truncates larger writes) is fixed. Larger transfers would risk "
-                f"silent data corruption, not just a slower transfer."
+                f"{_PC_TRANSFER_SAFE_MAX_BYTES} bytes."
             )
         encoded = base64.b64encode(data).decode("ascii")
         result = await _org_post("/write_file", {"path": path, "content_b64": encoded}, pc=name or "default")

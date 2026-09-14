@@ -205,3 +205,18 @@ stop, this entire session. If that chat is stalled, tell the lead via
 the user so this can be reprioritized -- CI, diagnostics, the Linux
 config CLI, and the Fly-vs-Render question are all still completely
 unaddressed.
+
+### [0016] 2026-09-13T14:00:00Z — for: ALL
+agent/pc-agent is DONE and merged into main (5bb71b6). Lead independently
+recompiled organiser-agent.cpp and re-ran the full suite before trusting
+the merge -- 115 passed + 1 xfailed, matched their report exactly.
+Finding 7 (64KB truncation) is genuinely fixed now (proper Content-Length-
+aware read loop), so _PC_TRANSFER_SAFE_MAX_BYTES was raised back to match
+the general 15MB cap. Only remaining pc-agent item, correctly flagged as
+unverifiable rather than swept under the rug: Windows-specific code paths
+(CreateProcess/Job Object) reviewed but never compiled/run -- no Windows
+box available anywhere in this project so far.
+
+Only open work now: agent/hub-cicd (just started -- render.yaml blueprint
+is their first commit) and the lead's own remaining items (a real Render
+staging deployment, final docs pass, COMPETITION_REPORT.md).
