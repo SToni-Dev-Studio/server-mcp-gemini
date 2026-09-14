@@ -39,6 +39,7 @@ writing (`python3 -m pytest tests/ -v`).
 | 19 | Independent re-verification of lead's 4 fixes (commit 7dc1695) | server.py | — | **All 4 confirmed sound** |
 | 20 | Unauthenticated `/config` POST can PERMANENTLY hijack a PC agent (both implementations) | organiser-agent.cpp + organiser-agent.py | **High** | Confirmed, both implementations, design-level |
 | 21 | `working_dir` injection re-verified fixed (pc-agent's rewrite) | organiser-agent.cpp | — | **Confirmed fixed**, exploit closed, legit use unaffected |
+| 22 | Windows-specific claims re-verified against a REAL Windows binary (cross-compiled, run under Wine) | organiser-agent.cpp | — | **Methodology upgrade** — several "unverified, needs Windows" items now confirmed |
 
 ---
 
@@ -733,3 +734,87 @@ every other Windows-specific claim in this document — I don't have a
 Windows target to run it on, but the `lpCurrentDirectory` approach is the
 correct native primitive and structurally can't reintroduce the same bug
 class the way string concatenation could).
+
+
+## 22. Methodology upgrade: real Windows verification via cross-compilation + Wine
+
+Every Windows-specific claim in this document up to this point was
+explicitly caveated as "static analysis only — I don't have a Windows
+target, so this is a hypothesis from reading the code, not a confirmed
+finding." That caveat is now substantially narrower.
+
+**What I did:** installed `g++-mingw-w64-x86-64` and `wine64` (both from
+Ubuntu's own package repos — `apt-get install`, no untrusted third-party
+sources), cross-compiled the *exact current* `organiser-agent.cpp` from
+`main` into a real Windows PE32+ executable, and ran it under Wine —
+which emulates the real Win32 API surface (path canonicalization,
+`CreateProcess`, the registry-free parts of the filesystem API, etc.).
+Confirmed the binary genuinely exercises the Windows code path (its own
+`/status` response reports `"platform":"Windows"`, which is a compile-time
+`#if IS_WIN` branch, not something Wine could fake).
+
+**Caveat, stated plainly and not glossed over:** this is MinGW-compiled,
+not MSVC-compiled — a real Windows deployment likely uses MSVC. Wine
+emulates genuine Win32 API behavior, so *filesystem/path/process-creation*
+findings below are a strong proxy for real Windows. The C++
+runtime/allocator internals (MinGW's libstdc++ vs. MSVC's STL) could
+differ somewhat, so the one allocator-specific result (the `max_bytes`
+finding) is reported with that narrower caveat — the *qualitative*
+result (an exception is thrown and caught, not a crash) is a
+language-level C++ guarantee that doesn't depend on which standard
+library implementation is in use, so it very likely holds regardless,
+but isn't claimed as a byte-for-byte match to an MSVC build.
+
+**Results — three previously-unverified items now confirmed:**
+
+1. **The exact traversal case pc-agent's own test honestly flagged as
+   unverifiable.** `tests/test_organiser_agent.py`'s Flask-side
+   equivalent test (`test_path_traversal_attempt_still_caught`) is
+   marked `@unittest.expectedFailure` on Linux, with a detailed and
+   *correct* explanation: `pathlib.PosixPath` never normalizes `/` vs
+   `\` the way `pathlib.WindowsPath` does on real Windows, so a
+   forward-slash traversal payload can't be shown to converge with a
+   backslash-form protected path on a Linux sandbox. **I independently
+   confirmed their hypothesis was right**: against the real (Wine-
+   emulated) Windows path semantics, `C:/windows/system32/../../windows/system32`
+   *is* correctly caught and rejected (`403`, "Path is inside the
+   protected Windows system directory"). This closes finding-adjacent
+   uncertainty for both the C++ and (by extension, since it was already
+   confirmed via mocking on the Python side) Flask implementations'
+   protected-path guards.
+2. **Finding 21 (working_dir fix) re-confirmed under real Windows
+   `CreateProcess` behavior**, including the specific double-quote +
+   `&` injection shape hypothesized (never confirmed) in finding 2's
+   original write-up for the `cmd.exe` code path. Used a real
+   marker-file side effect (not a naive string match against the
+   rejection message, which legitimately echoes the attempted path
+   back and would otherwise cause a false positive) — no marker file
+   was created; the payload was correctly rejected as a non-existent
+   directory. Legitimate `working_dir` use was separately confirmed
+   to still work correctly (`dir` listed the real directory's contents).
+3. **Finding 4's `max_bytes` allocation failure re-confirmed on a real
+   Windows process** (with the MinGW/MSVC caveat above): a 10 GB
+   request against a 5-byte file threw a caught exception (`500`,
+   `std::bad_alloc`), the process survived, and remained responsive
+   immediately afterward.
+
+Also re-confirmed the basic protected-path guard correctness on real
+Windows (case-insensitivity, no false-positive on a sibling directory
+like `C:\windows2`) — all consistent with what static review and the
+Flask-side mocked tests already suggested, now with a real Windows
+binary backing it up.
+
+**What's still genuinely unverified, honestly:** the screenshot/GDI
+code path (compiles fine cross-platform but wasn't exercised — Wine's
+virtual display setup is a bigger lift than was worth it for this
+pass), and anything that depends on real Windows-specific filesystem
+quirks Wine doesn't fully emulate (8.3 short names, `\\?\` extended-length
+prefixes, NTFS alternate data streams). Those remain flagged as
+hypotheses, not findings, exactly as before — this upgrade closes three
+specific, previously-flagged gaps; it doesn't claim total Windows
+coverage.
+
+**Regression tests** (skip cleanly if `g++-mingw-w64-x86-64`/`wine`
+aren't installed, so this doesn't become a hard CI dependency):
+`tests/test_organiser_agent_windows_via_wine.py`, 6 tests, all passing
+in this environment after installing the two packages above.

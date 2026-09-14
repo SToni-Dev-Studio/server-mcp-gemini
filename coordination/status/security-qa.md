@@ -210,3 +210,51 @@ wire protocol level" item from the previous "still to do" list.
 - Full suite: 153 passing + 1 xfailed (the finding-7 buffer-truncation
   regression test, correctly xfailed since that fix is still open on
   pc-agent's side per broadcast [0013]) across 10 test files.
+
+
+## Update: major methodology upgrade -- real Windows verification via MinGW + Wine
+Installed g++-mingw-w64-x86-64 and wine64 (both from Ubuntu's own repos)
+and cross-compiled the real organiser-agent.cpp into a genuine Windows
+PE32+ binary, run under Wine (real Win32 API emulation, not guesswork).
+Confirmed it genuinely exercises the Windows code path (its own /status
+reports "platform":"Windows", a compile-time branch Wine can't fake).
+
+This closes three specific "static analysis only, needs Windows" gaps
+with real confirmed results:
+- The EXACT traversal case (forward-slash path resolving back into
+  C:\windows) that tests/test_organiser_agent.py's own Flask-side test
+  honestly marks @unittest.expectedFailure on Linux, with a correct
+  explanation of why Linux can't demonstrate it -- I independently
+  confirmed their hypothesis was right: it IS caught on real Windows
+  path semantics.
+- Finding 21 (working_dir fix) re-confirmed under real CreateProcess
+  behavior, including the double-quote+& injection shape hypothesized
+  but never confirmed for the cmd.exe path. Used a real marker-file
+  side-effect check (not a naive string match, which would false-positive
+  against the legitimate rejection message echoing the payload back).
+- Finding 4's max_bytes bad_alloc DoS re-confirmed on a real Windows
+  process (with an honest MinGW-vs-MSVC caveat on the allocator
+  specifics, though the qualitative "throws, doesn't crash" result is a
+  C++ language guarantee independent of that).
+
+Stated the caveat plainly: MinGW-compiled + Wine-emulated, not a genuine
+MSVC/real-hardware Windows box. Strong proxy for filesystem/path/process
+behavior; less certain for allocator internals specifically. Not
+claiming total Windows coverage -- screenshot/GDI path and NTFS-specific
+quirks (8.3 names, \\?\ prefixes) remain unverified hypotheses.
+
+6 new tests in tests/test_organiser_agent_windows_via_wine.py, skip
+cleanly if the two packages aren't installed (not a hard CI dependency).
+
+Full suite: 159 passing + 1 xfailed across 11 test files.
+
+## Next
+- Haven't yet done the same systematic injection/concurrency sweep
+  against the Flask organiser-agent.py that I did for the C++ version --
+  only checked auth/config/working_dir on it so far.
+- Should verify finding 7's workaround (_PC_TRANSFER_SAFE_MAX_BYTES,
+  per broadcast [0013]) rather than trusting the broadcast description.
+- User has offered codespace (real network) + a Render test deployment
+  for higher-fidelity verification of finding 15 (DNS-rebinding host
+  header behavior) in real production -- haven't used that yet, this
+  Windows work took priority given it closed three long-standing gaps.
