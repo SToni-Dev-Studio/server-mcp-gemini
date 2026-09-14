@@ -135,31 +135,36 @@ def test_secret_gate_works_when_configured(agent_binary):
         assert status == 200, "correct secret should be accepted"
 
 
-def test_working_dir_command_injection_FIXED(agent_binary, tmp_path):
-    """FIXED by agent/pc-agent (as a side effect of the run_command
-    timeout rewrite, not a conscious fix of this specific finding --
-    they rewrote run_command to use fork()+chdir()+execl() instead of
-    building a single `/bin/bash -c "cd <dir> && <cmd>"` string, which
-    incidentally means working_dir is never shell text at all anymore,
-    plus an explicit fs::is_directory() check rejects anything that
-    isn't a real existing directory before it's ever used).
+def test_working_dir_command_injection(agent_binary, tmp_path):
+    """REMEDIATED by pc-agent (see SECURITY_FINDINGS.md finding 1/2 status
+    and coordination/status/pc-agent.md) -- this test originally proved
+    the vulnerability by injecting a `touch` via `working_dir` while
+    `command` was an inert echo, then asserting the marker file existed.
 
-    Originally: the `working_dir` field was embedded into a shell string
-    as `cd "<working_dir>" && <command>`, wrapped in `/bin/bash -c
-    '...'`, with NO escaping of single quotes in `working_dir`. A single
-    quote broke out of that wrapper and the remainder of working_dir was
-    interpreted as new shell syntax, independent of `command`.
+    Originally: `working_dir` was embedded into a shell string as
+    `cd "<working_dir>" && <command>`, wrapped in `/bin/bash -c '...'`,
+    with NO escaping of single quotes. A single quote broke out of that
+    wrapper and the remainder of working_dir was interpreted as new
+    shell syntax, independent of `command`.
 
-    Lead re-verified this fix live (not just by reading the diff):
-    compiled this exact organiser-agent.cpp and re-ran this exact
-    payload by hand against the running binary before updating this
-    test -- see COMPETITION_REPORT.md for that verification.
+    Now: run_command no longer builds that string at all. The POSIX path
+    validates working_dir with fs::is_directory() and then chdir()s a
+    forked child directly before exec; the Windows path passes it as
+    CreateProcess's lpCurrentDirectory parameter. Neither ever treats
+    working_dir as shell text.
 
-    This test now proves the FIX holds: the same payload that used to
-    plant a marker file must be rejected outright (organiser-agent
-    validates working_dir as a real directory before doing anything with
-    it, and a shell-injection payload string is never a real directory),
-    and the marker must NOT exist afterward.
+    Verified independently twice, not just by reading the diff: pc-agent
+    compiled this exact organiser-agent.cpp and re-ran this exact exploit
+    payload by hand against the running binary; lead did the same
+    separately before updating this test (see COMPETITION_REPORT.md for
+    that verification).
+
+    Per the original docstring's own instruction ("if this starts
+    failing because the bug was fixed, please update SECURITY_FINDINGS.md
+    to mark it remediated instead of just deleting this test") -- kept
+    as a permanent regression test, inverted to confirm the fix holds:
+    the exact same payload must now be REJECTED (working_dir isn't a
+    real directory) and must NOT create the marker file.
     """
     marker = tmp_path / "PWNED_VIA_WORKING_DIR"
     assert not marker.exists()
@@ -169,30 +174,60 @@ def test_working_dir_command_injection_FIXED(agent_binary, tmp_path):
             base, "/run_command",
             {"command": "echo should_not_matter", "working_dir": payload_working_dir},
         )
-        # Rejected as an invalid working_dir (it's not a real directory),
-        # never reaches a shell with the payload embedded in it.
+        # Fixed behavior: this isn't a real directory, so it's now a
+        # clean 400 -- not a 200 that silently ran the injected shell
+        # syntax.
         assert status == 400, f"expected clean 400 rejection, got {status}: {body!r}"
     assert not marker.exists(), (
-        "REGRESSION: working_dir shell-injection fired again -- the "
-        "fork/exec + fs::is_directory validation was removed or "
-        "bypassed. This is a HIGH-severity finding if it starts "
-        "failing again; see SECURITY_FINDINGS.md finding 1."
+        "REGRESSION: the working_dir shell-injection is back -- the "
+        "marker file was created, meaning working_dir is being "
+        "shell-interpreted again instead of passed as a real chdir "
+        "target/lpCurrentDirectory. This is a HIGH-severity finding if "
+        "it starts failing again; see SECURITY_FINDINGS.md finding 1."
     )
 
 
-def test_oversized_max_bytes_does_not_crash_process(agent_binary, tmp_path):
-    """/preview's max_bytes is attacker-controlled with no upper bound and
-    is used to pre-allocate a std::string of that size BEFORE the actual
-    file size is known. A absurd value (10 GB) against a tiny file causes
-    a std::bad_alloc -- confirmed caught cleanly (HTTP 500) on this Linux
-    build, process survives. Windows allocator/OOM behavior under real
-    memory pressure has NOT been verified (needs a real Windows target)."""
+def test_working_dir_injection_via_real_directory_with_malicious_name(agent_binary, tmp_path):
+    """Stricter companion to the test above: proves the underlying
+    chdir()/CreateProcess mechanism is safe, not just that the
+    is_directory() precheck happens to reject payloads that aren't real
+    paths. Creates an ACTUAL directory whose name contains shell
+    metacharacters and confirms changing into it via /run_command's pwd
+    does not trigger injection."""
+    marker = tmp_path / "PWNED2"
+    weird_dir = tmp_path / "weird'; touch marker_should_not_appear; echo '"
+    weird_dir.mkdir()
+    assert not marker.exists()
+    with running_agent(agent_binary, secret=None) as (base, _):
+        status, body = _post(
+            base, "/run_command",
+            {"command": "pwd", "working_dir": str(weird_dir)},
+        )
+        assert status == 200
+        result = json.loads(body)
+        assert result["returncode"] == 0
+        # pwd's output should be exactly the weird directory path --
+        # proving chdir() changed into it literally, not that any part
+        # of the name was interpreted as shell syntax.
+        assert result["stdout"].strip() == str(weird_dir)
+    assert not marker.exists()
+
+
+def test_oversized_max_bytes_no_longer_crashes_or_leaks_memory(agent_binary, tmp_path):
+    """REMEDIATED by pc-agent (see SECURITY_FINDINGS.md finding 4 status).
+    max_bytes is now clamped to MAX_READ_BYTES (20MB) and additionally
+    capped to the real file size before any allocation happens. Inverted
+    from the original crash-proving test to confirm: (a) no more
+    std::bad_alloc/500, (b) the response is still correct (returns the
+    actual small file's content, not silently wrong data), (c) the
+    process survives and stays responsive."""
     small_file = tmp_path / "small.bin"
     small_file.write_bytes(b"hello world")
     with running_agent(agent_binary, secret=None) as (base, proc):
         status, body = _get(base, f"/preview?path={small_file}&max_bytes=10000000000")
-        assert status == 500
-        assert b"bad_alloc" in body or b"error" in body
+        assert status == 200, f"expected clean 200 with clamped read, got {status}: {body}"
+        result = json.loads(body)
+        assert result["content"] == "hello world"
         # process must still be alive and responsive afterwards
         status2, _ = _get(base, "/status")
         assert status2 == 200, "process did not survive the oversized max_bytes request"

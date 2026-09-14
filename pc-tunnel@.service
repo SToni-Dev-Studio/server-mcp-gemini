@@ -23,9 +23,21 @@
 #      EOF
 #      (each PC needs a different PORT — 7842, 7843, 7844, ...)
 #   3. Make sure SSH key auth works: ssh sepisotoni@<PC_IP>  (no password)
-#   4. sudo systemctl daemon-reload
-#   5. sudo systemctl enable --now pc-tunnel@<name>
-#   6. sudo systemctl status pc-tunnel@<name>
+#   4. Pin the PC's host key (see SECURITY_FINDINGS.md finding 6 — this
+#      used to be StrictHostKeyChecking=no, which accepts ANY host key
+#      presented at connect time with no warning, so a LAN-position
+#      attacker who could spoof the PC's IP (ARP spoofing, a rogue DHCP
+#      lease, a DNS trick if addressed by name) could silently MITM the
+#      tunnel):
+#        sudo mkdir -p /etc/pc-tunnel/known_hosts.d
+#        ssh-keyscan -H <PC_IP> | sudo tee /etc/pc-tunnel/known_hosts.d/<name> > /dev/null
+#      Do this over a connection you trust (ideally on first setup, on
+#      the same LAN segment, right after configuring the PC) — the whole
+#      point of pinning is to lock in the key you saw *this once* so any
+#      future mismatch is rejected rather than silently accepted.
+#   5. sudo systemctl daemon-reload
+#   6. sudo systemctl enable --now pc-tunnel@<name>
+#   7. sudo systemctl status pc-tunnel@<name>
 #
 # Then add the PC to the PCS env var in Render (or via the admin
 # dashboard at /admin), e.g.:
@@ -46,7 +58,8 @@ ExecStart=/usr/bin/ssh \
     -o ServerAliveInterval=30 \
     -o ServerAliveCountMax=3 \
     -o ExitOnForwardFailure=yes \
-    -o StrictHostKeyChecking=no \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/etc/pc-tunnel/known_hosts.d/%i \
     -o BatchMode=yes \
     -L 127.0.0.1:${PORT}:localhost:${PORT} \
     sepisotoni@${PC_IP}

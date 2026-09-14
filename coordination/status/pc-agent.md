@@ -1,132 +1,120 @@
 # Status: pc-agent
-Updated: 2026-09-13T10:03:57Z
+Updated: 2026-09-13T16:34:20Z
 Branch: agent/pc-agent
-State: DONE (for the scope in my brief + broadcast [0006]; see Blockers for what's genuinely unverified)
-Last broadcast read: 0008
+State: DONE (brief + broadcast [0006] + all priority security findings from [0010]/[0011]/[0013]; see Blockers for the one thing genuinely out of my hands)
+Last broadcast read: 0015
 
 ## Summary
-Fixed a real, verified bug in organiser-agent.cpp (run_command had no
-enforced timeout — popen()-based, would hang forever). Added a
-protected-path guard to organiser-agent.py (it had none at all —
-shutil.move/rmtree took any path, unlike the .cpp build which already
-had this). Added machine identity (machine_id/machine_name) exposed via
-/status per broadcast [0002] correction — NOT a competing registry;
-server.py's PCS registry is still the source of truth for hub-side PC
-config. Per broadcast [0006]: added /read_file_b64 + content_b64
-support on /write_file (binary-safe file transfer) and a /config +
-/admin local dashboard (secret/machine_name management without
-hand-editing files) to both organiser-agent.py and organiser-agent.cpp.
+Round 1: fixed a real, verified bug in organiser-agent.cpp (run_command
+had no enforced timeout), added a protected-path guard to
+organiser-agent.py (had none at all), added machine identity exposed via
+/status (broadcast [0002]), and added /read_file_b64 + content_b64 on
+/write_file plus a /config + /admin local dashboard to both builds
+(broadcast [0006]). Merged into main at bd8714c.
 
-Pinging lead directly: /read_file_b64 (GET, query params path/max_bytes,
-returns {content_b64, size_bytes, returned_bytes, truncated}) and
-/write_file's new content_b64 body field are ready in both builds —
-file_transfer's pc: leg can be wired to them.
+Round 2: treated the HIGH-severity working_dir injection as top priority
+per broadcast [0010]; verified it was ALREADY closed as a side effect of
+round 1's run_command rewrite (proved with security-qa's exact exploit
+plus a stricter test of my own). Fixed three more organiser-agent.cpp
+findings (4, 5, 7) and one infra finding (6). Pushed after lead had
+already merged round 1 into main -- so lead's independent rediscovery of
+finding 7 (broadcast [0011]/[0013]) was correct at the time, just ahead
+of this fix reaching main.
 
-## Files changed
-- organiser-agent.py — protected-path guard, machine registry, /config,
-  /admin, /read_file_b64, content_b64 on /write_file
-- organiser-agent.cpp — run_command timeout fix (real bug), machine
-  registry, /config, /admin, /read_file_b64, content_b64 on /write_file
-- tests/test_organiser_agent.py — new, 33 tests
+Round 3 (this update): read broadcasts [0011]-[0015] in full, ran the
+new step-0 check (git fetch + compare origin/agent/pc-agent against what
+I remembered pushing -- clean, no surprise commits from another
+session). Merged origin/main (resolving 2 real conflicts -- both sides
+had independently reached the same conclusions on finding 1, reconciled
+into one version). Properly fixed the mcp-SDK dependency mismatch I'd
+previously given up on (installed the exact pinned mcp==1.29.0 from
+requirements.txt) so I could finally run the FULL test suite, not just
+my own subset. Re-verified finding 7's fix end-to-end against lead's own
+regression test using the exact 128,000-byte payload that caught the bug
+originally -- confirmed it holds. Raised server.py's
+_PC_TRANSFER_SAFE_MAX_BYTES workaround back to the full 15MB now that
+it's no longer needed, and updated the e2e test file per its own
+embedded instructions (invert, don't delete).
 
-Commits (agent/pc-agent, all pushed):
-- 377d3e9 — organiser-agent.py changes
-- 59cf209 — organiser-agent.cpp changes
-- b25bf52 — tests
+## Files changed (round 3, on top of rounds 1-2)
+- server.py -- raised _PC_TRANSFER_SAFE_MAX_BYTES to match
+  _FILE_TRANSFER_MAX_BYTES (15MB), updated now-stale comments/error
+  message
+- tests/test_file_transfer_pc_e2e.py -- inverted
+  test_organiser_agent_still_has_the_64kb_truncation_bug into
+  test_organiser_agent_no_longer_has_the_64kb_truncation_bug (per its
+  own instruction); fixed test_pc_transfer_rejects_payload_over_the_safe_cap,
+  which broke because raising the pc-specific cap to equal the general
+  cap makes the general check fire first (rewrote to check the actual
+  safety property, not a specific error-message wording)
+- SECURITY_FINDINGS.md -- finding 7 marked fully fixed and end-to-end
+  verified, with the merge-timing explanation documented
+
+Commits (agent/pc-agent, all pushed, HEAD is 038dd96):
+- 86caa29, 734213f, f742298, 6f5d451, 0e9d39d -- round 2 (see prior
+  status entries, still on this branch, unchanged)
+- d6e12bc -- merge origin/main (resolved conflicts in
+  SECURITY_FINDINGS.md, tests/test_organiser_agent_security.py)
+- 038dd96 -- finding 7 end-to-end closure (this round)
 
 ## Tests run (command -> result)
-All run for real, in this environment (Linux sandbox — see Blockers for
-what that does and doesn't prove):
-
-- `python3 -m unittest tests.test_organiser_agent -v`
-  -> 33 tests, 32 pass + 1 expectedFailure (see below). Run from repo
-     root with `HOME` pointed at a scratch dir so config-file tests
-     don't touch a real user profile.
-  Covers: protected-path logic + Flask routes (move/delete/write_file/
-  list all correctly 403 inside C:\Windows, forward-slash-form path
-  traversal collapses correctly), machine_id persists across a reload
-  and survives a corrupted config file, run_command timeout/malformed
-  input/nonzero-exit handling via the actual Flask test client, binary
-  round-trip through content_b64 write + read_file_b64 read (a
-  256-distinct-byte-value blob, verified byte-identical both ways),
-  invalid-base64 rejected cleanly (400, no file written), /config
-  hot-reloads machine_name and secret without restart, and env-var
-  secret still wins over an attempted config-file override.
-  One test (`test_path_traversal_attempt_still_caught`) is marked
-  `@unittest.expectedFailure` with an inline explanation: on Linux,
-  pathlib.PosixPath never normalizes '/' vs '\' the way WindowsPath
-  does on real Windows, so a backslash-form traversal check across
-  separator styles can only be fully confirmed on an actual Windows
-  host. Confirmed by hand that this is a POSIX-path-semantics artifact,
-  not a logic bug, by comparing resolve() output for both forms
-  directly (see commit message / earlier session for the exact repro).
-
-- `g++ -std=c++17 -O2 -Wall -o organiser-agent organiser-agent.cpp -lpthread`
-  -> compiles clean (one expected unused-function warning for
-     b64_encode, which is only referenced from the #if IS_WIN screenshot
-     path).
-
-- Manual, real HTTP tests against the compiled Linux binary (not
-  mocked — actual curl requests to a running instance):
-  - /status returns machine_id/machine_name.
-  - run_command: quick command returns fast; nonzero exit reported
-    correctly; missing command -> 400; bad working_dir -> 400.
-  - **Timeout, the important one**: `sleep 90` against the 60s deadline
-    -> returned `{"error":"Command timed out after 60s"}` at exactly
-    60s elapsed (measured). Confirmed via `ps aux` 35s later that the
-    killed process was gone (not just abandoned).
-  - **Process-group kill**: `sleep 90 & wait` (a backgrounded
-    grandchild) — confirmed via `ps aux` while running that both the
-    `bash -c` wrapper AND the grandchild `sleep 90` existed, then
-    confirmed both gone after the timeout fired. This is exactly the
-    case the old popen()-based code would have leaked.
-  - content_b64 write_file + read_file_b64: wrote a 1024-byte blob
-    covering all 256 byte values via content_b64, verified the on-disk
-    file was byte-identical to the input, then read it back via
-    read_file_b64 and verified that was also byte-identical. Malformed
-    base64 -> 400, no file written. Nonexistent path -> 404. max_bytes
-    truncation flagged correctly (truncated: true, returned_bytes
-    matches the cap).
-  - /config + /admin: set secret via /config -> /status immediately
-    started requiring it (no restart) -> correct secret succeeds,
-    wrong one 401s. /admin loads fine with no secret header even after
-    a secret is set (page shell exempted, /config calls it makes are
-    still checked). Empty machine_name rejected (400). Env-var secret
-    confirmed to still win when a config-file secret is also POSTed.
+- `python3 -m pytest tests/ -v` (FULL SUITE, all 116 tests, all test
+  files including ones I couldn't previously collect) -> **115 passed,
+  1 xfailed**. Fixed the blocker myself this round: previous sessions'
+  attempts to install `mcp` pulled in an incompatible v2.x API
+  (FastMCP renamed); installing the exact `mcp==1.29.0` pinned in
+  requirements.txt resolved it cleanly. This is the first time I've
+  run the actual complete suite rather than a subset.
+- `python3 -m pytest tests/test_file_transfer_pc_e2e.py -v` (lead's own
+  finding-7 regression suite) -> all 5 pass, INCLUDING the inverted
+  truncation-bug test using the exact 128,000-byte payload that
+  originally caught the bug -- confirmed byte-identical on disk now
+  (was 48,981 of 128,000 bytes before the fix).
+- `g++ -std=c++17 -O2 -Wall -o <bin> organiser-agent.cpp -lpthread`
+  -> compiles clean.
 
 ## Findings / security notes
-- **Real bug, fixed**: organiser-agent.cpp's run_command had no timeout
-  enforcement at all (popen() blocks until the child exits, full stop).
-  A hung or malicious long-running command would tie up a connection
-  thread indefinitely. Fixed with fork/exec + poll + process-group
-  SIGKILL on deadline (POSIX) and CreateProcess + Job Object (Windows,
-  reviewed only, not compiled — flagging honestly, not claiming it
-  works).
-- **Real gap, fixed**: organiser-agent.py had NO protected-path checks
-  anywhere — every file op could touch C:\Windows. organiser-agent.cpp
-  already had this; now both agree.
-- Investigated whether the single global ORGANISER_SECRET is a gap
-  given the hub's per-PC secrets in PCS — it isn't: each organiser-agent
-  process IS one physical machine with exactly one secret matching its
-  own PCS entry, so there's no "which PC's secret" ambiguity for the
-  agent side to resolve. Documenting this reasoning rather than
-  building something to solve a non-problem.
-- /run_command's shell-execution nature is an unavoidable, separate
-  risk surface from the path guard — documented clearly in-code on both
-  builds (it accepts a full command line, not an argv list, so there's
-  no static way to tell whether it touches a protected path). Mitigated
-  by ORGANISER_SECRET + recommending least-privilege OS accounts, not by
-  a string check.
-- No Plex references anywhere in this file's area (verified via grep
-  per broadcast [0004] — there weren't any to begin with).
+- The "finding 7 rediscovery" flagged in broadcast [0011]/[0013] was a
+  merge-timing artifact, not a real regression or a flaw in my fix.
+  Confirmed via git history: `86caa29` (my finding-7 fix) was pushed to
+  `agent/pc-agent` AFTER lead had already merged an earlier state of
+  this branch into `main` at `bd8714c`. Lead's rediscovery, using a
+  128,000-byte payload against that pre-fix `main` state, was entirely
+  correct at the time -- it just predated the actual fix. I verified
+  this explanation by checking `git merge-base --is-ancestor 86caa29
+  origin/main` (returned false at the time) rather than assuming either
+  side's report was wrong.
+- Both my branch and main independently arrived at the same fix and the
+  same conclusion for finding 1 while working in parallel (my own
+  verification vs. lead's live re-verification, per broadcast [0011]) --
+  a nice cross-validation, reconciled into one merged writeup rather
+  than picking one side arbitrarily.
+- Raising `_PC_TRANSFER_SAFE_MAX_BYTES` to equal `_FILE_TRANSFER_MAX_BYTES`
+  made the pc-specific size check in `server.py`'s `_location_write_bytes`
+  effectively dead code at that exact threshold (the general check earlier
+  in the function now always fires first). Left the pc-specific check in
+  place rather than removing it -- it's harmless, self-documenting, and
+  becomes live again if either constant is ever changed independently of
+  the other -- but rewrote the test that exercised it to check the
+  actual safety property (oversized pc: writes are still rejected,
+  never silently corrupted) instead of a specific error-message wording
+  that was really an implementation detail of which code path caught it.
+- Followed the new step-0 routine from broadcast [0014] this session:
+  checked `origin/agent/pc-agent` against what I remembered pushing
+  before starting work, and again before the final push. Both checks
+  came back clean (no unrecognized commits) -- the incident described in
+  [0014] doesn't appear to have recurred here.
 
 ## Blockers / questions for lead
-- **Windows-only code paths are unverified by execution**: the C++
-  run_command's CreateProcess/Job Object path, and both builds'
-  Windows-specific protected-path resolution (GetWindowsDirectoryA /
-  SystemRoot-based), are code-reviewed carefully but never compiled or
-  run — no Windows toolchain in this environment. If anyone has a
-  Windows box, worth a real smoke test before this goes into
-  production, especially the Job Object timeout-kill path.
-- No blockers on my actual scope — brief + broadcast [0006] items are
-  done, tested to the extent this environment allows, and pushed.
+- **Finding 2 (Windows-side injection) still cannot be verified by
+  execution** -- no Windows toolchain available to pc-agent in this
+  environment either. The fix should close it by the same logic as the
+  POSIX side (CreateProcess's lpCurrentDirectory instead of any shell
+  string), but "should" isn't "verified." If anyone gets access to a
+  real Windows box, this plus the CreateProcess/Job Object timeout-kill
+  path are the two things most worth a real smoke test before this goes
+  into production.
+- No other blockers. Brief + broadcast [0006] + every priority security
+  finding from [0010]/[0011]/[0013] are done, tested end-to-end against
+  the actual regression tests that caught them (not just my own), and
+  pushed. Full 116-test suite passes on this branch.
