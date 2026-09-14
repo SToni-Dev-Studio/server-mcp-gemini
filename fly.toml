@@ -2,6 +2,18 @@
 #
 # See https://fly.io/docs/reference/configuration/ for information about how to use this file.
 #
+# STATUS (set by agent/hub-cicd, see coordination/status/hub-cicd.md):
+# Render is the confirmed, supported, actually-deployed target — see
+# render.yaml and ARCHITECTURE.md's "Deployment target" section.
+# server.py DOES auto-detect FLY_APP_NAME (for MCP_ALLOWED_HOST) so this
+# file would plausibly still work if someone deployed it to Fly, but
+# nothing in this project's history confirms a Fly deployment is
+# actually live, tested, or maintained — it appears to predate the
+# switch to Render and was never removed. Kept as-is (not deleted)
+# since deleting a working-if-unused config is a bigger, less reversible
+# call than documenting its status; if Fly support is confirmed dead,
+# removing this file is a safe follow-up.
+#
 app = 'codespaces-mcp'
 primary_region = 'iad'
 [build]

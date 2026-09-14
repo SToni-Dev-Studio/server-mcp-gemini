@@ -1,0 +1,85 @@
+# Render Blueprint (https://render.com/docs/blueprint-spec) for
+# server-mcp-claude's server.py.
+#
+# This is the supported deployment target — see ARCHITECTURE.md's
+# "Deployment target" section and coordination/status/hub-cicd.md for
+# why (in short: everything actually wired up in server.py — the /admin
+# dashboard's Render API calls, the hardcoded default RENDER_SERVICE_ID,
+# every existing setup doc — is Render-specific; fly.toml is present but
+# unconfirmed/unmaintained, kept only for reference).
+#
+# The live production service (RENDER_SERVICE_ID's default value,
+# srv-da11cupt0dsc73aq2qq0) already exists and was not created from this
+# file. This blueprint is for:
+#   - Reproducing the deployment (disaster recovery, a second
+#     environment, a fork).
+#   - Documenting, in one reviewable place, exactly which env vars a
+#     working deployment needs — this list is generated from
+#     .secrets.example and server.py's actual os.environ.get() calls,
+#     not guessed.
+#   - `render blueprint launch` / the Render dashboard's "New Blueprint"
+#     flow, for anyone standing up a fresh instance.
+#
+# Every secret below is `sync: false` (Render's way of saying "set this
+# manually in the dashboard, don't store a value in the repo"). Nothing
+# here is a real credential — see .secrets.example for what each one
+# does and whether it's required.
+
+services:
+  - type: web
+    name: codespaces-mcp
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    region: oregon
+    healthCheckPath: /
+    envVars:
+      # --- MCP endpoint auth (required once publicly reachable) ---
+      - key: MCP_SERVER_PASSWORD
+        sync: false
+
+      # --- Admin dashboard (/admin) — optional, falls back to MCP_SERVER_PASSWORD ---
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: ADMIN_COOKIE_SECRET
+        sync: false
+
+      # --- This service's own Render identity (lets /admin manage itself) ---
+      - key: RENDER_API_KEY
+        sync: false
+      - key: RENDER_SERVICE_ID
+        sync: false # defaults to srv-da11cupt0dsc73aq2qq0 in server.py if unset — override for a NEW service
+
+      # --- GitHub Codespaces ---
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: GITHUB_TOKEN_SECONDARY
+        sync: false
+      - key: GITHUB_TOKEN_TERTIARY
+        sync: false
+
+      # --- Linux home server (server_* tools) ---
+      - key: SERVER_HOST
+        sync: false
+      - key: SERVER_USER
+        sync: false
+      - key: SSH_PRIVATE_KEY
+        sync: false
+      - key: TAILSCALE_AUTH_KEY
+        sync: false
+
+      # --- Windows PC(s) via organiser-agent (pc_* tools) ---
+      # JSON registry, e.g. {"desktop": {"port": 7842, "secret": "..."}}
+      # — see ARCHITECTURE.md for the full multi-PC setup.
+      - key: PCS
+        sync: false
+
+      # --- MCP_ALLOWED_HOST is auto-detected from RENDER_EXTERNAL_HOSTNAME
+      #     (which Render sets automatically on every service — do not set
+      #     it yourself here) — only needed to override that default.
+      - key: MCP_ALLOWED_HOST
+        sync: false
+
+      # PORT is set automatically by Render; do not add it here — an
+      # explicit envVars entry would override Render's own assignment.
