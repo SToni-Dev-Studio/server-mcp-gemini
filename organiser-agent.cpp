@@ -91,8 +91,15 @@ namespace fs = std::filesystem;
 
 static int         g_port   = 7842;
 static std::string g_secret = "";
-static const char* VERSION  = "2.1.0-cpp";
+static const char* VERSION  = "2.2.0-cpp";
 static const int   RUN_COMMAND_TIMEOUT_S = 60;
+// Hard ceiling for any single-file read (/preview, /read_file_b64),
+// regardless of what a caller's max_bytes asks for. See SECURITY_FINDINGS.md
+// finding 4 — this was previously unbounded and pre-allocated before the
+// real file size was known, so an absurd max_bytes against a tiny file
+// caused std::bad_alloc. 20MB comfortably covers file_transfer's 15MB cap
+// plus JSON/base64 overhead while still bounding worst-case memory use.
+static const size_t MAX_READ_BYTES = 20 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // Tiny JSON builder  (no external deps)
@@ -904,13 +911,25 @@ static Response h_delete(const Request& req) {
 
 static Response h_preview(const Request& req) {
     std::string path_s = req.query.count("path") ? req.query.at("path") : "";
-    size_t max_bytes = req.query.count("max_bytes") ? (size_t)std::stoull(req.query.at("max_bytes")) : 4096;
+    size_t requested = req.query.count("max_bytes") ? (size_t)std::stoull(req.query.at("max_bytes")) : 4096;
     if (path_s.empty()) return Response::err(400, "Missing 'path'");
     fs::path p(path_s);
     Response blocked;
     if (reject_if_protected(p, blocked)) return blocked;
     if (!fs::exists(p)) return Response::err(404, "Path does not exist: " + path_s);
     if (!fs::is_regular_file(p)) return Response::err(400, "Not a file");
+
+    // Finding 4 (SECURITY_FINDINGS.md): max_bytes was previously
+    // attacker-controlled with no upper bound and used to pre-allocate a
+    // buffer BEFORE checking the real file size — a request for e.g. 10GB
+    // against a 1KB file caused std::bad_alloc. Fix: clamp to a hard
+    // ceiling regardless of what's requested, AND never allocate more
+    // than the file actually contains.
+    std::error_code ec;
+    uintmax_t file_size = fs::file_size(p, ec);
+    size_t max_bytes = std::min(requested, MAX_READ_BYTES);
+    if (!ec) max_bytes = std::min(max_bytes, (size_t)file_size);
+
     std::ifstream f(p, std::ios::binary);
     if (!f) return Response::err(500, "Cannot open file");
     std::string content(max_bytes, '\0');
@@ -1104,9 +1123,9 @@ static Response h_write_file(const Request& req) {
 // file_transfer's pc: leg move binaries to/from a PC without corruption.
 static Response h_read_file_b64(const Request& req) {
     std::string path_s = req.query.count("path") ? req.query.at("path") : "";
-    size_t max_bytes = req.query.count("max_bytes")
+    size_t requested = req.query.count("max_bytes")
         ? (size_t)std::stoull(req.query.at("max_bytes"))
-        : 10 * 1024 * 1024; // 10MB default cap
+        : 10 * 1024 * 1024; // 10MB default
     if (path_s.empty()) return Response::err(400, "Missing 'path'");
     fs::path p(path_s);
     Response blocked;
@@ -1114,8 +1133,13 @@ static Response h_read_file_b64(const Request& req) {
     if (!fs::exists(p)) return Response::err(404, "Path does not exist: " + path_s);
     if (!fs::is_regular_file(p)) return Response::err(400, "Not a file");
 
+    // Same finding-4 fix as h_preview: clamp to MAX_READ_BYTES and never
+    // allocate more than the file actually contains.
     std::error_code ec;
     uintmax_t size = fs::file_size(p, ec);
+    size_t max_bytes = std::min(requested, MAX_READ_BYTES);
+    if (!ec) max_bytes = std::min(max_bytes, (size_t)size);
+
     std::ifstream f(p, std::ios::binary);
     if (!f) return Response::err(500, "Cannot open file");
     std::vector<uint8_t> buf(max_bytes);
@@ -1245,31 +1269,101 @@ static std::string status_text(int code) {
     }
 }
 
+// Constant-time string comparison for secret checks (SECURITY_FINDINGS.md
+// finding 5: plain std::string != short-circuits on the first differing
+// byte, a timing side channel). Matches the standard shape used by e.g.
+// Python's hmac.compare_digest: length is compared normally (that alone
+// isn't the sensitive part — the point is not leaking which *byte*
+// differs), and every byte of the longer string is still visited even
+// after a mismatch is found, so timing does not correlate with *where*
+// two equal-length secrets first differ.
+static bool constant_time_equal(const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return false;
+    unsigned char diff = 0;
+    for (size_t i = 0; i < a.size(); i++) {
+        diff |= (unsigned char)a[i] ^ (unsigned char)b[i];
+    }
+    return diff == 0;
+}
+
 static void handle_conn(SOCKET sock) {
-    // Read request (simple, not streaming — good for small API payloads)
-    char buf[65536]; int total=0;
-    while (total < (int)sizeof(buf)-1) {
-        int n = recv(sock, buf+total, sizeof(buf)-1-total, 0);
-        if (n <= 0) break;
-        total += n;
-        buf[total] = 0;
-        // Stop when we have headers + body
-        if (strstr(buf, "\r\n\r\n")) {
-            // Check Content-Length for body
-            const char* cl = strstr(buf, "Content-Length:");
-            if (!cl) cl = strstr(buf, "content-length:");
-            if (cl) {
-                int clen = atoi(cl + 15);
-                const char* body_start = strstr(buf, "\r\n\r\n");
-                if (body_start) {
-                    int header_size = (int)(body_start - buf) + 4;
-                    if (total - header_size >= clen) break;
-                }
-            } else break;
+    // Read request into a growable buffer (SECURITY_FINDINGS.md finding 7:
+    // this used to be a fixed 64KB stack buffer that silently stopped
+    // once full, regardless of whether the declared Content-Length was
+    // actually satisfied — a 200KB write_file body was confirmed to get
+    // silently truncated to ~64KB with an HTTP 200 "success" response.
+    // Fix: read headers first, size-check Content-Length against a hard
+    // ceiling BEFORE committing to reading the whole body, then keep
+    // reading (growing the buffer) until we've actually received exactly
+    // as many bytes as declared — never fewer, silently.
+    static const size_t MAX_HEADER_BYTES = 64 * 1024;       // plenty for any real HTTP header block
+    static const size_t MAX_BODY_BYTES   = 25 * 1024 * 1024; // headroom over MAX_READ_BYTES for JSON/base64 overhead
+
+    std::string raw;
+    raw.reserve(8192);
+    char chunk[8192];
+    size_t header_end = std::string::npos;
+    long long content_length = -1;
+    size_t header_size = 0;
+
+    // Phase 1: read until we have the full header block (\r\n\r\n).
+    while (header_end == std::string::npos) {
+        int n = recv(sock, chunk, sizeof(chunk), 0);
+        if (n <= 0) { closesocket(sock); return; }
+        raw.append(chunk, n);
+        if (raw.size() > MAX_HEADER_BYTES) {
+            // Header block itself is absurd — bail out rather than loop
+            // forever waiting for a terminator that may never come.
+            closesocket(sock);
+            return;
+        }
+        header_end = raw.find("\r\n\r\n");
+    }
+    header_size = header_end + 4;
+
+    {
+        // Case-insensitive-enough search: real HTTP header names are
+        // conventionally "Content-Length", but be tolerant of case since
+        // this parser doesn't do full header normalization elsewhere either.
+        size_t cl_pos = raw.find("Content-Length:");
+        if (cl_pos == std::string::npos) cl_pos = raw.find("content-length:");
+        if (cl_pos != std::string::npos && cl_pos < header_end) {
+            content_length = atoll(raw.c_str() + cl_pos + 15);
         }
     }
 
-    std::string raw(buf, total);
+    if (content_length > 0 && (size_t)content_length > MAX_BODY_BYTES) {
+        // Reject BEFORE reading the (huge) body into memory at all.
+        std::string ebody = Json::obj({{"error", Json::str(
+            "Request body too large (" + std::to_string(content_length) +
+            " bytes, max " + std::to_string(MAX_BODY_BYTES) + ")")}});
+        std::string resp = "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+                            + std::to_string(ebody.size()) + "\r\n\r\n" + ebody;
+        send(sock, resp.c_str(), (int)resp.size(), 0);
+        closesocket(sock);
+        return;
+    }
+
+    // Phase 2: keep reading until we actually have header_size +
+    // content_length bytes — not just until some fixed buffer fills up.
+    size_t want_total = header_size + (content_length > 0 ? (size_t)content_length : 0);
+    while (raw.size() < want_total) {
+        int n = recv(sock, chunk, sizeof(chunk), 0);
+        if (n <= 0) break; // connection closed early / short body — handle what we got
+        raw.append(chunk, n);
+    }
+    if (content_length > 0 && raw.size() - header_size < (size_t)content_length) {
+        // Client claimed a Content-Length it never actually sent (or the
+        // connection dropped mid-body) — don't silently process a
+        // truncated body as if it were complete.
+        std::string ebody = Json::obj({{"error", Json::str("Connection closed before declared Content-Length was fully received")}});
+        std::string resp = "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+                            + std::to_string(ebody.size()) + "\r\n\r\n" + ebody;
+        send(sock, resp.c_str(), (int)resp.size(), 0);
+        closesocket(sock);
+        return;
+    }
+
     if (raw.empty()) { closesocket(sock); return; }
 
     // Parse request line
@@ -1318,7 +1412,7 @@ static void handle_conn(SOCKET sock) {
     // the equivalent comment in organiser-agent.py's admin_page().
     if (!g_secret.empty() && req.path != "/admin") {
         std::string hdr = req.headers.count("x-organiser-secret") ? req.headers.at("x-organiser-secret") : "";
-        if (hdr != g_secret) {
+        if (!constant_time_equal(hdr, g_secret)) {
             std::string ubody = "{\"error\":\"Unauthorized\"}";
             std::string resp = "HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: "
                                 + std::to_string(ubody.size()) + "\r\n\r\n" + ubody;

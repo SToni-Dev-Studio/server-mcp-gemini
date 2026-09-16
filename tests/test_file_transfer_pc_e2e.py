@@ -90,21 +90,17 @@ def running_agent(binary_path):
 
 
 def test_organiser_agent_binary_endpoints_binary_roundtrip_SMALL_PAYLOAD(agent_binary, tmp_path):
-    """REAL HTTP against a real running binary, with a payload kept under
-    organiser-agent.cpp's known 64KB request-buffer limit (finding 7 --
-    see SECURITY_FINDINGS.md and the _PC_TRANSFER_SAFE_MAX_BYTES comment
-    in server.py). Confirms every one of 256 distinct byte values
-    survives when the payload is within the size the agent can actually
-    handle correctly today.
+    """REAL HTTP against a real running binary. Confirms every one of 256
+    distinct byte values survives a round trip through content_b64 /
+    read_file_b64.
 
     NOTE: an earlier version of this test used a 128,000-byte payload and
     caught finding 7 independently -- the write silently succeeded
-    (HTTP 200) but only wrote 48,981 of 128,000 bytes. That's why
-    server.py's file_transfer now enforces _PC_TRANSFER_SAFE_MAX_BYTES
-    (40,000 raw bytes) on the pc: leg specifically -- see
-    test_pc_transfer_rejects_payload_over_the_safe_cap below, which
-    proves the NEW code rejects an oversized transfer cleanly instead of
-    silently corrupting it.
+    (HTTP 200) but only wrote 48,981 of 128,000 bytes. That's now fixed
+    (see test_organiser_agent_no_longer_has_the_64kb_truncation_bug
+    below) -- this test's payload size no longer matters for correctness,
+    kept modest just because it doesn't need to be large to prove the
+    byte-range round-trips correctly.
     """
     with running_agent(agent_binary) as base:
         target = str(tmp_path / "roundtrip.bin")
@@ -127,16 +123,29 @@ def test_organiser_agent_binary_endpoints_binary_roundtrip_SMALL_PAYLOAD(agent_b
         assert body["truncated"] is False
 
 
-def test_organiser_agent_still_has_the_64kb_truncation_bug(agent_binary, tmp_path):
-    """Confirms finding 7 (SECURITY_FINDINGS.md) is still present, so
-    _PC_TRANSFER_SAFE_MAX_BYTES in server.py stays justified. If this
-    test starts failing because organiser-agent.cpp got a proper
-    Content-Length-aware read loop, that's GOOD -- raise
+def test_organiser_agent_no_longer_has_the_64kb_truncation_bug(agent_binary, tmp_path):
+    """FIXED by pc-agent (agent/pc-agent commit 86caa29, merged into main):
+    finding 7 (SECURITY_FINDINGS.md) -- organiser-agent.cpp's handle_conn
+    used a fixed 65536-byte buffer and silently stopped reading once full,
+    regardless of the declared Content-Length, reporting HTTP 200
+    "success" on the truncated write. Replaced with a growable read that
+    keeps reading until the declared Content-Length is actually satisfied
+    (or cleanly rejects with 413 if it's over a 25MB hard ceiling, or 400
+    if the connection drops early) -- never silently short.
+
+    This test originally proved the bug with this exact 128,000-byte
+    payload (silently landed as 48,981 bytes). Per its own original
+    instruction ("if this starts failing because organiser-agent.cpp got
+    a proper Content-Length-aware read loop, that's GOOD -- raise
     _PC_TRANSFER_SAFE_MAX_BYTES back toward _FILE_TRANSFER_MAX_BYTES in
-    server.py and update this test rather than just deleting it."""
+    server.py and update this test rather than just deleting it") --
+    inverted to confirm the fix holds, and _PC_TRANSFER_SAFE_MAX_BYTES
+    has been raised to match _FILE_TRANSFER_MAX_BYTES (15MB) since the
+    underlying reason for the lower cap no longer applies.
+    """
     with running_agent(agent_binary) as base:
         target = str(tmp_path / "oversized.bin")
-        binary_content = bytes(range(256)) * 500  # 128,000 bytes
+        binary_content = bytes(range(256)) * 500  # 128,000 bytes -- the exact payload that originally caught this bug
         encoded = base64.b64encode(binary_content).decode("ascii")
 
         req = urllib.request.Request(
@@ -146,14 +155,16 @@ def test_organiser_agent_still_has_the_64kb_truncation_bug(agent_binary, tmp_pat
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=5) as resp:
-            assert resp.status == 200  # "succeeds" -- that's the bug
+            assert resp.status == 200
 
         with open(target, "rb") as f:
             on_disk = f.read()
-        assert len(on_disk) < len(binary_content), (
-            "finding 7 appears fixed -- organiser-agent no longer silently "
-            "truncates oversized request bodies. Update "
-            "_PC_TRANSFER_SAFE_MAX_BYTES in server.py and this test."
+        assert on_disk == binary_content, (
+            "REGRESSION: finding 7 (silent request-body truncation) is "
+            "back -- organiser-agent wrote fewer bytes than were sent. "
+            "If this starts failing, lower _PC_TRANSFER_SAFE_MAX_BYTES "
+            "in server.py back down and re-open SECURITY_FINDINGS.md "
+            "finding 7 as unfixed."
         )
 
 
@@ -190,9 +201,20 @@ def test_server_file_transfer_calls_binary_safe_endpoints(monkeypatch, tmp_path)
 
 
 def test_pc_transfer_rejects_payload_over_the_safe_cap(monkeypatch):
-    """server.py's own defensive cap (independent of organiser-agent) --
-    proves an oversized pc: write is rejected BEFORE it ever reaches the
-    agent, with a clear message, rather than silently corrupting."""
+    """Proves an oversized pc: write is rejected before it ever reaches
+    the agent, with a clear message, rather than silently corrupting.
+
+    Note: now that _PC_TRANSFER_SAFE_MAX_BYTES == _FILE_TRANSFER_MAX_BYTES
+    (finding 7 is fixed, so the pc:-specific lower cap is no longer
+    needed -- see the comment on _PC_TRANSFER_SAFE_MAX_BYTES in
+    server.py), the general _location_write_bytes size check at the top
+    of the function fires first for any payload over the cap, before
+    kind-specific logic is even reached. This test checks the safety
+    property that actually matters (oversized pc: writes are rejected,
+    never silently truncated) rather than which specific code path or
+    exact wording produces the rejection -- that's an implementation
+    detail that correctly changed once finding 7 was fixed.
+    """
     called = {"post": False}
 
     async def fake_org_post(path, body=None, pc="default"):
@@ -206,7 +228,7 @@ def test_pc_transfer_rejects_payload_over_the_safe_cap(monkeypatch):
         asyncio.run(srv._location_write_bytes("pc:desktop:/tmp/x.bin", oversized))
         assert False, "should have raised ValueError"
     except ValueError as e:
-        assert "capped" in str(e)
+        assert str(srv._PC_TRANSFER_SAFE_MAX_BYTES) in str(e) or str(srv._FILE_TRANSFER_MAX_BYTES) in str(e)
     assert called["post"] is False, "should reject before ever calling the agent"
 
 
