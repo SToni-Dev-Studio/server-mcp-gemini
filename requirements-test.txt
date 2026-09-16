@@ -3,3 +3,17 @@
 # so a production deploy doesn't pull these in for no reason.
 pytest>=8.0
 pytest-asyncio>=0.24
+
+# organiser-agent.py (the Python reference implementation of the PC
+# agent) needs Flask to import at all -- tests/test_organiser_agent.py
+# and tests/test_organiser_agent_security.py both import it, so without
+# this the test suite fails to even COLLECT (not just fail to pass) on a
+# clean environment. Confirmed by hand: this was missing entirely before
+# agent/hub-cicd's CI work, so a fresh `pip install -r requirements.txt
+# -r requirements-test.txt` followed by `pytest tests/` failed at
+# collection with ModuleNotFoundError, never reaching a single test.
+# send2trash (organiser-agent.py's other import) is NOT listed here on
+# purpose -- it's wrapped in its own try/except ImportError in that file
+# and the tests cover the "not installed" path deliberately, so adding it
+# here would silently stop testing that fallback.
+flask>=3.0
