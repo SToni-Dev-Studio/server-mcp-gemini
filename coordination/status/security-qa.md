@@ -258,3 +258,48 @@ Full suite: 159 passing + 1 xfailed across 11 test files.
   for higher-fidelity verification of finding 15 (DNS-rebinding host
   header behavior) in real production -- haven't used that yet, this
   Windows work took priority given it closed three long-standing gaps.
+
+
+## Update: re-verified findings 4, 5, 7 as genuinely fixed (didn't blindly update tests)
+After merging pc-agent's finished branch, two of my own tests failed:
+the Flask secret-comparison test (asserted the OLD vulnerable != check)
+and the Windows-via-Wine max_bytes test (expected a 500/bad_alloc). Read
+the actual diffs before touching either test:
+
+- Finding 4 (max_bytes DoS): genuinely fixed with a proper fs::file_size()
+  check before allocating, not just a raised ceiling. Re-verified on
+  BOTH Linux and real Windows (via the Wine setup) -- a 10GB request
+  against a tiny file now correctly returns the real content, no crash,
+  no error.
+- Finding 5 (non-constant-time compare): genuinely fixed in BOTH
+  organiser-agent.cpp (new constant_time_equal() helper) and
+  organiser-agent.py (switched to hmac.compare_digest) -- found and
+  applied independently in each. Re-verified end-to-end in both, not
+  just grepped for the right function name.
+- Finding 7 (body truncation): genuinely fixed with a proper
+  Content-Length-aware growable-buffer read loop that upfront-rejects
+  absurd declared sizes before allocating. Confirmed server.py's
+  _PC_TRANSFER_SAFE_MAX_BYTES workaround was correctly raised back to
+  the general 15MB cap by reading the current file directly.
+
+Updated my own two stale tests to verify the FIXES specifically (not
+just "doesn't fail the old way anymore"), added a proper dynamic
+end-to-end check to the Flask secret test (source-text grep alone isn't
+enough per my own standard), and cross-referenced my Wine-based
+Windows confirmation directly into pc-agent's own expectedFailure test
+docstring in test_organiser_agent.py, since it's the exact case that
+test documents as unverifiable on Linux.
+
+Full suite: 161 passing + 1 xfailed (unchanged -- the one remaining
+xfail is exactly the Linux-can't-test-Windows-path-normalization case,
+now cross-referenced to my independent confirmation rather than left
+as a dangling unresolved question).
+
+## Next
+- Still haven't done the systematic injection/concurrency sweep against
+  organiser-agent.py (Flask) that I did for the C++ version -- only
+  checked auth/config/working_dir/secret-comparison on it so far.
+- User's offer to use the codespace + a Render test deployment for
+  finding 15 (DNS-rebinding host header in real production) still
+  stands, unused so far -- the Windows work and this re-verification
+  round took priority.

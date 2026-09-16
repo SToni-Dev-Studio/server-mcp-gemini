@@ -17,20 +17,25 @@ analysis only, needs a real Windows target" throughout SECURITY_FINDINGS.md:
     lpCurrentDirectory behavior, including the double-quote+ampersand
     injection shape hypothesized (but not confirmed) in the original
     finding 2 write-up for the Windows cmd.exe code path.
-  - The max_bytes allocation-failure behavior (finding 4) under a real
-    Windows process, confirming it fails as a caught exception rather
-    than crashing there too.
+  - The max_bytes fix (finding 4) under a real Windows process: since
+    the merge, organiser-agent.cpp now clamps max_bytes to a hard
+    ceiling AND to the real file size (checked via fs::file_size before
+    ever allocating), so this no longer even reaches an allocation
+    failure -- it just returns the correct, real file content. Re-
+    verified that end-to-end on real Windows (this was written when
+    the bug was still open and confirmed a caught bad_alloc; updated
+    after the fix landed to confirm the fix itself, not just that it
+    stopped crashing).
 
 CAVEAT, stated plainly: this cross-compiles with MinGW-w64 and runs
 under Wine, not a genuine Windows install with MSVC. Wine emulates the
 real Win32 API surface (path canonicalization, CreateProcess, etc.), so
 filesystem/path/process-creation findings here are a strong proxy for
-real Windows behavior. The C++ runtime/allocator specifics (MinGW's
-libstdc++ vs MSVC's STL) could differ somewhat, so the max_bytes
-allocator-failure-MODE finding is reported with that caveat -- the
-qualitative result (an exception is thrown and caught, no crash) is a
-language-level C++ guarantee and very likely holds either way, but
-isn't claimed as byte-for-byte identical to an MSVC build.
+real Windows behavior. The C++ runtime specifics (MinGW's libstdc++ vs
+MSVC's STL) could differ somewhat for anything allocator-internals-
+specific, though the max_bytes finding above no longer depends on that
+distinction now that it's fixed at the file-size-check level rather
+than relying on catching an allocation failure.
 
 Skips cleanly (does not fail) if the MinGW cross-compiler or Wine aren't
 available in the environment -- both were installed for this engagement
@@ -209,13 +214,23 @@ def test_working_dir_legitimate_use_still_works_on_real_windows(running_windows_
     assert b"present.txt" in body
 
 
-def test_max_bytes_oversized_does_not_crash_real_windows_process(running_windows_agent):
+def test_max_bytes_oversized_is_clamped_and_returns_real_content_FIXED(running_windows_agent):
+    """FIXED (finding 4): max_bytes is now clamped to a MAX_READ_BYTES
+    ceiling AND to the real file size (checked via fs::file_size before
+    allocating), so a 10GB request against a tiny file no longer even
+    attempts an oversized allocation -- it just returns the file's
+    actual content. Re-verified end-to-end against the real Windows
+    binary: correct content comes back, not a crash and not an error."""
     base, win_tmp, prefix = running_windows_agent
     small = os.path.join(prefix, "drive_c", "wine-small.txt")
     with open(small, "w") as f:
-        f.write("hello")
+        f.write("hello world")
 
     status, body = _get(base, "/preview?path=C:\\wine-small.txt&max_bytes=10000000000")
-    assert status == 500
+    assert status == 200, (
+        f"expected the fix to clamp cleanly and succeed, got {status}: {body}"
+    )
+    parsed = json.loads(body)
+    assert parsed["content"] == "hello world"
     status2, _ = _get(base, "/status")
-    assert status2 == 200, "process did not survive the oversized allocation on real Windows"
+    assert status2 == 200

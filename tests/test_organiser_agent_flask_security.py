@@ -83,23 +83,39 @@ def test_flask_working_dir_is_never_shell_text(flask_app, tmp_path):
     assert not marker.exists()
 
 
-def test_flask_secret_comparison_documented_as_non_constant_time():
-    """Documents (does not fix): _check_auth() uses a plain `!=` string
-    comparison for the secret, same category of timing side-channel as
-    the C++ version's `hdr != g_secret` (finding 5). Practical
-    exploitability is low (loopback-only), same caveat as before."""
-    import inspect
+def test_flask_secret_comparison_is_constant_time_FIXED():
+    """FIXED (previously finding 5's Flask-side analog): _check_auth now
+    uses hmac.compare_digest instead of a plain `!=` comparison, matching
+    the pattern server.py already used."""
+    src = open(os.path.join(REPO_ROOT, "organiser-agent.py")).read()
+    assert "hmac.compare_digest" in src, (
+        "if this now fails, the constant-time fix was reverted or "
+        "reworded -- re-verify end-to-end before re-flagging finding 5 "
+        "as open again"
+    )
+    assert 'request.headers.get("X-Organiser-Secret", "") != SECRET' not in src
+
+
+def test_flask_secret_comparison_fix_works_end_to_end(monkeypatch):
+    """Dynamic end-to-end proof, not just a source-text check: with a
+    real secret configured, wrong/missing credentials are rejected and
+    the correct one is accepted."""
+    isolated_home = tempfile.mkdtemp(prefix="flask-organiser-secret-test-")
+    monkeypatch.setenv("HOME", isolated_home)
+    monkeypatch.setenv("XDG_CONFIG_HOME", os.path.join(isolated_home, ".config"))
+    monkeypatch.setenv("ORGANISER_SECRET", "test-secret-end-to-end-verify")
+    monkeypatch.delenv("ORGANISER_MACHINE_NAME", raising=False)
+
     spec = importlib.util.spec_from_file_location(
-        "organiser_agent_flask_src_check",
+        "organiser_agent_flask_secret_e2e",
         os.path.join(REPO_ROOT, "organiser-agent.py"),
     )
     mod = importlib.util.module_from_spec(spec)
-    # don't exec_module here (would start reading real env/config) --
-    # just read the source text for this specific check.
-    src = open(os.path.join(REPO_ROOT, "organiser-agent.py")).read()
-    assert 'request.headers.get("X-Organiser-Secret", "") != SECRET' in src, (
-        "if this assertion fails because the comparison was changed to "
-        "something constant-time (e.g. hmac.compare_digest), that's a "
-        "genuine improvement -- update SECURITY_FINDINGS.md finding 5's "
-        "coverage note rather than just fixing this test"
-    )
+    spec.loader.exec_module(mod)
+    client = mod.app.test_client()
+
+    assert client.get("/status", headers={"X-Organiser-Secret": "wrong"}).status_code == 401
+    assert client.get("/status").status_code == 401  # no header at all
+    assert client.get(
+        "/status", headers={"X-Organiser-Secret": "test-secret-end-to-end-verify"}
+    ).status_code == 200

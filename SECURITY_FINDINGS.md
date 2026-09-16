@@ -67,6 +67,7 @@ writing (`python3 -m pytest tests/ -v`).
 | 20 | Unauthenticated `/config` POST can PERMANENTLY hijack a PC agent (both implementations) | organiser-agent.cpp + organiser-agent.py | **High** | Confirmed, both implementations, design-level |
 | 21 | `working_dir` injection re-verified fixed (pc-agent's rewrite) | organiser-agent.cpp | — | **Confirmed fixed**, exploit closed, legit use unaffected |
 | 22 | Windows-specific claims re-verified against a REAL Windows binary (cross-compiled, run under Wine) | organiser-agent.cpp | — | **Methodology upgrade** — several "unverified, needs Windows" items now confirmed |
+| 23 | Findings 4, 5, 7 (max_bytes DoS, non-constant-time compare, body truncation) — all independently re-verified fixed | organiser-agent.cpp + organiser-agent.py | — | **All 3 confirmed fixed**, including on real Windows for finding 4 |
 
 ---
 
@@ -935,3 +936,65 @@ coverage.
 aren't installed, so this doesn't become a hard CI dependency):
 `tests/test_organiser_agent_windows_via_wine.py`, 6 tests, all passing
 in this environment after installing the two packages above.
+
+
+## 23. Findings 4, 5, and 7 — independently re-verified as fixed
+
+Since finding 22 was written, `main` moved again (pc-agent's branch
+finished and was merged at `5bb71b6`, with a further fix at `038dd96`).
+I read the actual diffs (not just the broadcast's summary) and
+independently re-verified each of the three findings that diff claims
+to close, rather than updating my tests to match the new behavior
+without checking *why* it changed first.
+
+**Finding 4 (max_bytes DoS) — genuinely and completely fixed.**
+`organiser-agent.cpp` now has a hard `MAX_READ_BYTES` ceiling (20 MB)
+*and*, more importantly, checks `fs::file_size()` **before** allocating
+anything, clamping to `min(requested, MAX_READ_BYTES, actual_file_size)`.
+This is the correct fix — better than just raising the ceiling, since a
+tiny file now allocates only exactly its own size regardless of what
+`max_bytes` asks for. Re-verified end-to-end on **both** platforms:
+- Linux: a 10 GB request against a small file now returns `200` with
+  the file's real content (previously `500`/`bad_alloc`).
+- **Real Windows (cross-compiled + Wine, see finding 22's methodology)**:
+  same result — a 10 GB request against a 12-byte file correctly
+  returns `{"content": "hello world"}`, not a crash, not an error.
+
+**Finding 5 (non-constant-time secret comparison) — genuinely fixed,
+in *both* implementations independently.**
+- `organiser-agent.cpp` added a proper `constant_time_equal()` helper
+  (XOR-accumulate over every byte of equal-length strings, matching the
+  standard shape used by e.g. Python's `hmac.compare_digest`) and
+  switched the secret check to use it.
+- `organiser-agent.py` (Flask) switched its check to
+  `hmac.compare_digest()` directly — same fix, different implementation,
+  found and applied independently.
+
+Re-verified end-to-end (not just that the right function name appears
+in the source): wrong secret → `401`, no header → `401`, correct
+secret → `200`, in both implementations.
+
+**Finding 7 (oversized request bodies silently truncated) — genuinely
+fixed.** The old fixed 64 KB stack buffer that silently stopped once
+full (regardless of whether `Content-Length` was actually satisfied) is
+replaced with: read headers first, reject upfront (`413`) if the
+declared `Content-Length` exceeds a hard ceiling *before* committing to
+reading the body into memory, then keep reading into a growable buffer
+until the actual declared byte count is received — never silently
+fewer. `server.py`'s `_PC_TRANSFER_SAFE_MAX_BYTES` workaround (which had
+temporarily lowered the safe transfer cap to 40 KB while this was open)
+was correctly raised back to match the general 15 MB
+`_FILE_TRANSFER_MAX_BYTES` cap now that the underlying bug is closed —
+confirmed by reading the current `server.py` directly, not just the
+commit message.
+
+**On process/methodology**, for the record: I did not blindly update my
+own tests to expect the new (correct) behavior. For each of the three, I
+first read the actual diff, understood the specific mechanism of the
+fix, and only then re-ran (or rewrote) the corresponding test to assert
+the *fix's* correctness — not merely "no longer fails the old way." Two
+of my own tests initially failed after merging this round for exactly
+this reason (asserting the old vulnerable behavior); both are now
+corrected to verify the fix itself, with an explicit runtime check
+(not just a source-text grep) added to the Flask secret-comparison test
+in particular.
