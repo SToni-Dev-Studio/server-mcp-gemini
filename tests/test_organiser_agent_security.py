@@ -72,10 +72,10 @@ def _free_port():
 
 @contextlib.contextmanager
 def running_agent(binary, secret=None, extra_env=None):
-    """organiser-agent persists machine identity/secret to a fixed,
-    per-OS-user path ($HOME/.config/organiser-agent/machine.json on
-    Linux -- see SECURITY_FINDINGS.md finding 20). Every invocation here
-    gets its own isolated $HOME so tests never leak state into each
+    """IMPORTANT: organiser-agent persists machine identity/secret to a
+    fixed, per-OS-user path ($HOME/.config/organiser-agent/machine.json
+    on Linux -- see SECURITY_FINDINGS.md finding 20). Every invocation
+    here gets its own isolated $HOME so tests never leak state into each
     other or into whatever real $HOME this sandbox happens to have."""
     port = _free_port()
     isolated_home = tempfile.mkdtemp(prefix="organiser-agent-test-home-")
@@ -377,3 +377,51 @@ def test_machine_name_change_unaffected_by_the_secret_bootstrap_guard(agent_bina
         status, body = _post(base, "/config", {"machine_name": "my-desktop"})
         assert status == 200, f"machine_name change should not be blocked, got {status}: {body!r}"
         assert json.loads(body)["machine_name"] == "my-desktop"
+def test_unauthenticated_config_post_can_no_longer_hijack_the_machine(agent_binary):
+    """FIXED (was: succeeded, HIGH severity). This is security-qa's
+    original exploit test from before pc-agent's fix landed -- it used
+    to assert the hijack SUCCEEDED (status == 200, followed by the
+    legitimate owner getting locked out). Now proves the opposite: the
+    same zero-credential bootstrap attempt is rejected outright, nobody
+    gets locked out, and the "attacker's" chosen secret is never
+    accepted anywhere -- because it was never set in the first place.
+
+    See test_unauthenticated_config_post_cannot_bootstrap_the_initial_secret
+    above for the lead's/pc-agent's version of this same proof, written
+    independently before this branch's history was reconciled -- kept
+    both rather than deduplicating, since they're independent
+    confirmations of the same fix from two different sessions."""
+    with running_agent(agent_binary, secret=None) as (base, _):
+        # confirm the open baseline (still true, and still the
+        # documented, accepted, separate finding 3 -- this fix is
+        # narrower than "require auth for everything")
+        status, _ = _get(base, "/status")
+        assert status == 200
+
+        # attacker, holding no credentials at all, tries to set their
+        # own secret -- must be rejected, not accepted
+        status, body = _post(base, "/config", {"secret": "attacker-chosen-secret"})
+        assert status == 403, (
+            f"REGRESSION: got {status}, expected 403 -- if this now "
+            f"returns 200 again, the finding-20 fix was reverted or "
+            f"bypassed. Body: {body!r}"
+        )
+
+        # the legitimate owner is NOT locked out -- nothing was ever set
+        status, _ = _get(base, "/status")
+        assert status == 200
+
+        # the attacker's chosen secret was never persisted, so it
+        # doesn't work anywhere
+        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "attacker-chosen-secret"})
+        assert status == 200  # still open baseline, not "secret accepted"
+
+
+def test_config_endpoint_never_leaks_the_actual_secret_value(agent_binary):
+    """Positive check: GET /config must report whether a secret is set
+    and where it came from, but never the secret's actual value."""
+    with running_agent(agent_binary, secret="s3cr3t-value-should-not-leak") as (base, _):
+        status, body = _get(base, "/config", headers={"X-Organiser-Secret": "s3cr3t-value-should-not-leak"})
+        assert status == 200
+        assert b"s3cr3t-value-should-not-leak" not in body
+        assert b"secret_set" in body

@@ -97,6 +97,21 @@ class ProtectedPathTests(unittest.TestCase):
         # the same backslash-separated string and this passes. See
         # coordination/status/pc-agent.md for why this is flagged
         # unverified rather than silently skipped.
+        #
+        # UPDATE (security-qa, this session): independently confirmed
+        # this hypothesis is correct against a REAL Windows binary --
+        # cross-compiled organiser-agent.cpp with MinGW and ran it under
+        # Wine (real Win32 API emulation, not guesswork). The exact same
+        # shape of traversal (forward-slash path resolving back into
+        # C:\windows) IS correctly caught there. See SECURITY_FINDINGS.md
+        # finding 22 and tests/test_organiser_agent_windows_via_wine.py::
+        # test_protected_path_traversal_via_forward_slashes_IS_caught_on_real_windows
+        # for the reproducible confirmation. This test should stay
+        # exactly as-is (the Linux limitation it documents is still real
+        # and still correctly explained) -- the confirmation lives
+        # alongside it in a separate file rather than replacing this one,
+        # since this file's own tests correctly have no Wine/MinGW
+        # dependency.
         self.assertTrue(
             self.oa._is_protected_path(Path("C:/Users/me/../../Windows/System32"))
         )

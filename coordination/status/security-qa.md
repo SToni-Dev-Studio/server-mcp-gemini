@@ -1,6 +1,38 @@
 # security-qa status
 
-Last broadcast read: 0008
+Last broadcast read: 0015
+
+## ⚠️ URGENT FOR LEAD — recommend broadcasting: HIGH-severity finding 20
+Unauthenticated `/config` POST can PERMANENTLY hijack a PC agent, confirmed
+independently in BOTH organiser-agent.cpp and organiser-agent.py (Flask).
+Worse than the already-known finding 3: not "anyone can run one command
+during the exposure window", but "anyone can set their own secret,
+persisted to disk, surviving restart, with no network recovery path for
+the legitimate owner." Design-level gap replicated into two codebases.
+Full details, confirmed mechanism, and suggested fix directions in
+SECURITY_FINDINGS.md finding 20 and in the dated update further down this
+file. I'm not editing BROADCAST.md myself (it's lead-only per its own
+header), but given severity and that pc-agent may still be iterating on
+this feature, flagging here as prominently as I can for you to relay.
+
+## ⚠️ ALSO FOR LEAD — finding 25, organiser-agent.py binds 0.0.0.0
+Newly discovered: organiser-agent.py's own comments (near /config and
+/admin) explicitly claim "the same loopback binding as every other
+endpoint here" is its access-control model -- but the actual code is
+`app.run(host="0.0.0.0", ...)`, confirmed live via the real subprocess's
+own startup banner ("Running on all addresses"). This is a genuine
+code/comment mismatch, not something I'm inferring. Severity is mitigated
+by ARCHITECTURE.md/BUILD_AND_SETUP.md already saying "legacy, do not
+deploy" for this file -- so I'm not asking for urgent action, just
+flagging it for whoever eventually revisits organiser-agent.py (or if
+anyone's tempted to un-deprecate it now that it has path protection,
+which is itself a separate stale-docs correction -- see below). Also
+found while looking at this: ARCHITECTURE.md and README.md both still
+say organiser-agent.py "has no path-traversal protection" -- independently
+confirmed FALSE this session (_reject_if_protected is applied across all
+9 file-touching handlers, same pattern as the C++ side). Not editing
+those docs myself, flagging the drift for whoever owns them next. Full
+details in SECURITY_FINDINGS.md findings 24 and 25.
 
 ## Done
 - Re-verified the admin-cookie-forgery fix (b28ab02) independently; still
@@ -109,3 +141,226 @@ the underlying Python functions directly.
 
 This closes out the "malformed/adversarial MCP tool arguments...at the
 wire protocol level" item from the previous "still to do" list.
+
+
+## Update: closed remaining brief gaps + caught a new bug in the lead's own fix
+- Systematic fuzz sweep across ALL 43 tools' string parameters (not just a
+  hand-picked sample) -- discovered dynamically via tools/list at run
+  time, 19 adversarial payloads each, network fully mocked. 1420 calls in
+  the full engagement run, 0 findings. Locked in as
+  tests/test_all_tools_fuzz_sweep.py (trimmed payload set for CI speed).
+- Actually fired concurrent requests at state-changing tools (not just
+  reasoned about them, per the brief's explicit ask): 25-30 truly
+  concurrent async server_write_file calls with unique per-call markers
+  and an artificial mock delay to force interleaving -- zero
+  cross-contamination. Also fired 20 concurrent writes to the SAME path
+  -- no crashes/hangs/exceptions. Confirmed _admin_api_env_set PUTs each
+  key independently (no read-modify-write pattern), so there's no local
+  lost-update race to find in that code. tests/test_concurrency.py.
+- Filled in dynamic injection-resistance proof for the remaining
+  brief-named tools I'd only statically reviewed before:
+  server_delete_file, read_codespace_file, write_codespace_file, and
+  exec_command's codespace_name (confirmed it's argv-based, not shell --
+  can't be locally injected regardless of content).
+- Independently re-verified all 4 fixes the lead applied in 7dc1695
+  (from earlier docs-release/security-qa findings) rather than trusting
+  their own passing tests alone -- checked edge cases their tests didn't
+  cover (name@account combinations, exception surfacing through the real
+  wire protocol). All 4 hold up.
+- **New finding while doing that verification** (finding 18): the
+  `mkdir -p $(dirname {_q(path)})` pattern in three write paths
+  (write_codespace_file, file_transfer's server:/codespace: writes) has
+  an unquoted command substitution, so it word-splits on any path with a
+  space in a directory component -- verified by actually running the
+  real constructed command in a real shell; it creates two wrong garbage
+  directories and the write fails. Not a security hole (fails cleanly,
+  the existing "OK"/"__WRITE_OK__" checks catch it), but a real
+  reliability bug on a completely ordinary input. This pattern predates
+  the lead's fix (already in file_transfer) -- I missed it in my first
+  pass and only caught it while double-checking the fix commit. Suggested
+  fix verified to work: quote the substitution,
+  `mkdir -p "$(dirname {_q(path)})"`.
+- Full suite: 110 passing tests across 8 files.
+
+## Next
+- pc-agent has landed real commits (6f5d451) -- per the brief, this is
+  now the priority: attempt the same attack categories against whatever
+  they built. Haven't looked yet as of this status update.
+- Still open: Windows-only organiser-agent.cpp paths (no Windows box),
+  races against real remote infra (out of scope).
+
+
+## Update: pc-agent landed -- re-verified their fixes, found a new HIGH finding in their new feature
+- Re-verified finding 1 (working_dir injection) is genuinely fixed:
+  rebuilt organiser-agent.cpp from main, re-ran the EXACT original
+  exploit payload -- now cleanly rejected (400, honest error message),
+  no marker file created, legitimate working_dir use still works
+  correctly. Fix uses fork()+chdir()+execl() (POSIX) / lpCurrentDirectory
+  (Windows) -- working_dir is never shell text anymore, closed at the
+  root. Independently re-verified the lead's own re-verification, not
+  just trusted it.
+- Confirmed the reject_if_protected() Windows-directory guard is now
+  applied consistently across every file-mutating handler (list, move,
+  delete, preview, disk_usage, screenshot, write_file, read_file_b64) --
+  good coverage improvement. Still can't dynamically test the actual
+  Windows canonicalization logic itself (compiled out on non-Windows,
+  no Windows box available) -- stays flagged as unverified, not assumed
+  safe.
+- **NEW finding (20, HIGH severity)**: pc-agent's new /config dashboard
+  (both organiser-agent.cpp AND the separate Flask organiser-agent.py --
+  confirmed independently in both) lets an UNAUTHENTICATED caller
+  PERMANENTLY hijack the machine when no secret is configured yet --
+  not just "run one command during the exposure window" (finding 3),
+  but "set your own secret, persisted to disk, survives restart, locks
+  the legitimate owner out with no network recovery path." Verified
+  end-to-end against a real compiled C++ binary and against the real
+  Flask app via its test client. This is a design-level gap (the same
+  "no secret = no check" logic, originally reasonable for one-off
+  file/command ops, applied to a fundamentally different credential-
+  rotation endpoint) independently replicated into two separate
+  codebases -- flagging clearly so fixing one doesn't leave the other
+  exposed the same way. Full writeup + suggested fix directions (a real
+  product decision, not mine to make) in SECURITY_FINDINGS.md finding 20.
+  Posted as a broadcast given the severity and that it affects live
+  work pc-agent may still be iterating on.
+- Small housekeeping: added flask>=3.0 to requirements-test.txt (needed
+  to even collect tests/test_organiser_agent.py -- was causing a hard
+  collection error for anyone running the full suite fresh).
+- Full suite: 153 passing + 1 xfailed (the finding-7 buffer-truncation
+  regression test, correctly xfailed since that fix is still open on
+  pc-agent's side per broadcast [0013]) across 10 test files.
+
+
+## Update: major methodology upgrade -- real Windows verification via MinGW + Wine
+Installed g++-mingw-w64-x86-64 and wine64 (both from Ubuntu's own repos)
+and cross-compiled the real organiser-agent.cpp into a genuine Windows
+PE32+ binary, run under Wine (real Win32 API emulation, not guesswork).
+Confirmed it genuinely exercises the Windows code path (its own /status
+reports "platform":"Windows", a compile-time branch Wine can't fake).
+
+This closes three specific "static analysis only, needs Windows" gaps
+with real confirmed results:
+- The EXACT traversal case (forward-slash path resolving back into
+  C:\windows) that tests/test_organiser_agent.py's own Flask-side test
+  honestly marks @unittest.expectedFailure on Linux, with a correct
+  explanation of why Linux can't demonstrate it -- I independently
+  confirmed their hypothesis was right: it IS caught on real Windows
+  path semantics.
+- Finding 21 (working_dir fix) re-confirmed under real CreateProcess
+  behavior, including the double-quote+& injection shape hypothesized
+  but never confirmed for the cmd.exe path. Used a real marker-file
+  side-effect check (not a naive string match, which would false-positive
+  against the legitimate rejection message echoing the payload back).
+- Finding 4's max_bytes bad_alloc DoS re-confirmed on a real Windows
+  process (with an honest MinGW-vs-MSVC caveat on the allocator
+  specifics, though the qualitative "throws, doesn't crash" result is a
+  C++ language guarantee independent of that).
+
+Stated the caveat plainly: MinGW-compiled + Wine-emulated, not a genuine
+MSVC/real-hardware Windows box. Strong proxy for filesystem/path/process
+behavior; less certain for allocator internals specifically. Not
+claiming total Windows coverage -- screenshot/GDI path and NTFS-specific
+quirks (8.3 names, \\?\ prefixes) remain unverified hypotheses.
+
+6 new tests in tests/test_organiser_agent_windows_via_wine.py, skip
+cleanly if the two packages aren't installed (not a hard CI dependency).
+
+Full suite: 159 passing + 1 xfailed across 11 test files.
+
+## Next
+- Haven't yet done the same systematic injection/concurrency sweep
+  against the Flask organiser-agent.py that I did for the C++ version --
+  only checked auth/config/working_dir on it so far.
+- Should verify finding 7's workaround (_PC_TRANSFER_SAFE_MAX_BYTES,
+  per broadcast [0013]) rather than trusting the broadcast description.
+- User has offered codespace (real network) + a Render test deployment
+  for higher-fidelity verification of finding 15 (DNS-rebinding host
+  header behavior) in real production -- haven't used that yet, this
+  Windows work took priority given it closed three long-standing gaps.
+
+
+## Update: re-verified findings 4, 5, 7 as genuinely fixed (didn't blindly update tests)
+After merging pc-agent's finished branch, two of my own tests failed:
+the Flask secret-comparison test (asserted the OLD vulnerable != check)
+and the Windows-via-Wine max_bytes test (expected a 500/bad_alloc). Read
+the actual diffs before touching either test:
+
+- Finding 4 (max_bytes DoS): genuinely fixed with a proper fs::file_size()
+  check before allocating, not just a raised ceiling. Re-verified on
+  BOTH Linux and real Windows (via the Wine setup) -- a 10GB request
+  against a tiny file now correctly returns the real content, no crash,
+  no error.
+- Finding 5 (non-constant-time compare): genuinely fixed in BOTH
+  organiser-agent.cpp (new constant_time_equal() helper) and
+  organiser-agent.py (switched to hmac.compare_digest) -- found and
+  applied independently in each. Re-verified end-to-end in both, not
+  just grepped for the right function name.
+- Finding 7 (body truncation): genuinely fixed with a proper
+  Content-Length-aware growable-buffer read loop that upfront-rejects
+  absurd declared sizes before allocating. Confirmed server.py's
+  _PC_TRANSFER_SAFE_MAX_BYTES workaround was correctly raised back to
+  the general 15MB cap by reading the current file directly.
+
+Updated my own two stale tests to verify the FIXES specifically (not
+just "doesn't fail the old way anymore"), added a proper dynamic
+end-to-end check to the Flask secret test (source-text grep alone isn't
+enough per my own standard), and cross-referenced my Wine-based
+Windows confirmation directly into pc-agent's own expectedFailure test
+docstring in test_organiser_agent.py, since it's the exact case that
+test documents as unverifiable on Linux.
+
+Full suite: 161 passing + 1 xfailed (unchanged -- the one remaining
+xfail is exactly the Linux-can't-test-Windows-path-normalization case,
+now cross-referenced to my independent confirmation rather than left
+as a dangling unresolved question).
+
+## Next
+- Still haven't done the systematic injection/concurrency sweep against
+  organiser-agent.py (Flask) that I did for the C++ version -- only
+  checked auth/config/working_dir/secret-comparison on it so far.
+- User's offer to use the codespace + a Render test deployment for
+  finding 15 (DNS-rebinding host header in real production) still
+  stands, unused so far -- the Windows work and this re-verification
+  round took priority.
+
+## Update: systematic sweep of organiser-agent.py (Flask) -- two new findings
+Did the same systematic pass on the Flask implementation that I'd already
+done for the C++ one (auth, injection, path handling, binding). Confirmed
+its run_command/working_dir is safe by design (subprocess.run with a
+list + cwd=, never shell=True) -- no C++-style injection risk exists
+here at all, architecturally. Then found:
+
+- **Finding 24**: /preview opens files with errors="replace", so a
+  genuinely binary file returns HTTP 200 with SILENTLY corrupted content
+  (U+FFFD replacement characters) instead of a clean error. Worse: the
+  raw HTTP response bytes are themselves already valid UTF-8 (replacement
+  happened before serialization), so the exact safety net that
+  accidentally saves the C++ version (a downstream strict-decode hop)
+  would see nothing wrong here either. This directly matters for
+  broadcast [0008]'s "PC binary transfers must fail cleanly, not corrupt"
+  ask -- true for file_transfer (uses the binary-safe /read_file_b64),
+  NOT true for the separately-exposed pc_read_file_preview tool on this
+  implementation.
+- **Finding 25**: organiser-agent.py binds 0.0.0.0 (all interfaces),
+  confirmed via the real subprocess's own startup banner, directly
+  contradicting two of its own comments that explicitly claim "loopback
+  binding" as the access-control model. Also discovered its startup
+  banner tells users to expose it via ngrok to the public internet.
+  Severity is real but mitigated -- ARCHITECTURE.md/BUILD_AND_SETUP.md
+  already say "legacy, don't deploy" for this file. While checking this
+  I also found ARCHITECTURE.md/README.md's claim that this file "has no
+  path-traversal protection" is now STALE (it was added) -- flagged for
+  whoever owns docs next, not editing them myself.
+
+8 tests total in tests/test_organiser_agent_flask_security.py now (was
+6), all passing. Full suite: 164 passing + 1 xfailed.
+
+## Next
+- User's offer to use the codespace + a Render test deployment for
+  finding 15 (DNS-rebinding host header in real production) still
+  stands, unused so far.
+- Could look at hub-cicd's new commits (2ab1090, not yet merged to main)
+  once/if that lands, per the standing "attempt the same categories
+  once X lands" pattern -- CI/config-CLI territory is a different shape
+  of attack surface than anything tested so far, worth a fresh look
+  when it's actually on main.
