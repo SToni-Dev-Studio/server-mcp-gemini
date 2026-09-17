@@ -1562,7 +1562,11 @@ async def _admin_login(request: Request) -> RedirectResponse | HTMLResponse:
         return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=401)
     resp = RedirectResponse(url="/admin", status_code=303)
     resp.set_cookie(
-        _ADMIN_COOKIE_NAME, _admin_make_cookie(), max_age=_ADMIN_SESSION_TTL, httponly=True, samesite="lax"
+        _ADMIN_COOKIE_NAME, _admin_make_cookie(), max_age=_ADMIN_SESSION_TTL,
+        httponly=True, samesite="lax", secure=True,
+        # secure=True: Render/Fly serve HTTPS exclusively in practice, so this
+        # closes the "cookie sent over a mis-typed http:// URL" hole with zero
+        # downside (external review A9, confirmed and fixed).
     )
     return resp
 
@@ -1579,6 +1583,31 @@ def _require_admin(request: Request) -> JSONResponse | None:
     return None
 
 
+def _mask_secret_value(value: str) -> str:
+    """Mask an env var value for display: keep the last 4 characters
+    visible (enough to confirm 'is this the value I think it is' /
+    detect a stale value without exposing anything usable), mask the
+    rest. Values of 4 chars or fewer are fully masked.
+
+    SECURITY: this endpoint used to return every env var's value in
+    full plaintext -- GITHUB_TOKEN, MCP_SERVER_PASSWORD, SSH_PRIVATE_KEY,
+    RENDER_API_KEY, everything -- to any authenticated admin session.
+    That turns any admin-cookie leak (XSS, a shared screen, a browser
+    extension, a screenshot) into a full credential compromise instead
+    of just dashboard access. Confirmed by external review, verified
+    against the actual code, fixed here rather than re-filed as a
+    duplicate finding. There is deliberately no "reveal full value"
+    endpoint added alongside this -- if a real value is genuinely
+    needed, get it from Render's own dashboard, which has its own
+    audit trail for that action.
+    """
+    if not value:
+        return ""
+    if len(value) <= 4:
+        return "*" * len(value)
+    return "*" * (len(value) - 4) + value[-4:]
+
+
 async def _admin_api_env_get(request: Request) -> JSONResponse:
     if (denied := _require_admin(request)) is not None:
         return denied
@@ -1589,7 +1618,7 @@ async def _admin_api_env_get(request: Request) -> JSONResponse:
             r = await client.get(f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars", headers=_render_headers(), timeout=15)
         r.raise_for_status()
         items = r.json()
-        env_vars = [{"key": i["envVar"]["key"], "value": i["envVar"]["value"]} for i in items]
+        env_vars = [{"key": i["envVar"]["key"], "value": _mask_secret_value(i["envVar"]["value"])} for i in items]
         env_vars.sort(key=lambda v: v["key"])
         return JSONResponse({"vars": env_vars})
     except httpx.HTTPError as e:
