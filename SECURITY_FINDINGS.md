@@ -68,6 +68,8 @@ writing (`python3 -m pytest tests/ -v`).
 | 21 | `working_dir` injection re-verified fixed (pc-agent's rewrite) | organiser-agent.cpp | — | **Confirmed fixed**, exploit closed, legit use unaffected |
 | 22 | Windows-specific claims re-verified against a REAL Windows binary (cross-compiled, run under Wine) | organiser-agent.cpp | — | **Methodology upgrade** — several "unverified, needs Windows" items now confirmed |
 | 23 | Findings 4, 5, 7 (max_bytes DoS, non-constant-time compare, body truncation) — all independently re-verified fixed | organiser-agent.cpp + organiser-agent.py | — | **All 3 confirmed fixed**, including on real Windows for finding 4 |
+| 24 | `/preview` silently corrupts (not fails on) binary files via `errors="replace"` | organiser-agent.py | Medium-High (silent data corruption) | Confirmed, novel to Flask impl |
+| 25 | Binds `0.0.0.0` (all interfaces), contradicting its own "loopback binding" security comments | organiser-agent.py | High (mitigated: file is documented "do not deploy") | Confirmed via real subprocess |
 
 ---
 
@@ -998,3 +1000,133 @@ this reason (asserting the old vulnerable behavior); both are now
 corrected to verify the fix itself, with an explicit runtime check
 (not just a source-text grep) added to the Flask secret-comparison test
 in particular.
+
+
+## 24. `organiser-agent.py`'s `/preview` silently corrupts binary files instead of failing cleanly
+
+Contrast with `organiser-agent.cpp`'s `/preview` (finding 13: verified to
+either transfer correctly or fail cleanly, never silently corrupt).
+`organiser-agent.py`'s equivalent endpoint opens the file like this:
+
+```python
+with open(path, "r", encoding="utf-8", errors="replace") as f:
+    content = f.read(max_bytes)
+```
+
+`errors="replace"` means any byte sequence that isn't valid UTF-8 gets
+silently swapped for the U+FFFD replacement character **before** the
+response is ever built. Confirmed live against the same genuinely-binary
+test file used throughout this engagement (`bytes(range(256)) * 4`):
+
+- `HTTP 200` — reported as a success.
+- The returned `content` contains U+FFFD characters where real data was.
+- **Critically, the raw HTTP response bytes are themselves already valid
+  UTF-8** (since the replacement happened before serialization) — so the
+  exact safety net that happens to save the C++ version (a downstream
+  Python hop on the Linux server doing a *strict* UTF-8 decode, which
+  raises on genuinely invalid bytes) would see nothing wrong here. There
+  is no signal anywhere in the chain — no error, no `truncated: true`
+  flag, nothing — that the content differs from the real file.
+
+**Why this matters:** `pc_read_file_preview` (the MCP tool wrapping this
+endpoint) is documented as "text file" only, but nothing enforces that —
+and its own stated purpose ("peeking before deciding what to do with
+it") is exactly the scenario where a caller *doesn't yet know* whether a
+file is text or binary. This is precisely the "must fail cleanly, not
+corrupt" property broadcast [0008] asked me to verify for PC file
+transfers — verified true for `file_transfer` (which correctly uses the
+binary-safe `/read_file_b64` for its PC leg), but **not true** for this
+directly-exposed, separate `pc_read_file_preview` tool on the Flask
+implementation.
+
+**Not present in `organiser-agent.cpp`**, whose `/read_file_b64` is
+(both implementations) correctly binary-safe, and whose `/preview` fails
+loudly (if unintentionally) for genuinely binary content rather than
+succeeding silently.
+
+**Suggested fix:** either use `errors="strict"` (raise, catch, and
+return a clean 4xx — "not a text file") instead of `"replace"`, or have
+the endpoint sniff for binary content upfront (e.g., check for a NUL
+byte in the first N bytes, a common heuristic) and reject before ever
+attempting a text decode.
+
+Regression test:
+`tests/test_organiser_agent_flask_security.py::test_preview_of_binary_file_is_SILENTLY_CORRUPTED_not_a_clean_failure`.
+
+## 25. `organiser-agent.py` binds `0.0.0.0`, contradicting its own stated security model
+
+**Severity note up front:** `ARCHITECTURE.md` and `BUILD_AND_SETUP.md`
+already, correctly, tell people not to deploy this file
+("Legacy reference implementation... don't run it as your production
+agent"). That's a real, load-bearing mitigation and this finding doesn't
+override it. It's documented anyway because (a) it's a genuine, severe
+mismatch between the code's own stated intent and its actual behavior
+that would matter a great deal if this file is ever un-deprecated,
+copied as a reference for something else, or run by someone who didn't
+read the docs; and (b) at least one nearby doc claim about this same
+file (`organiser-agent.py` "has no path-traversal protection") is
+independently confirmed **stale** as of this session — protected-path
+guards were added — so claims about this file's exact risk profile are
+evidently still shifting, and this is a new one nobody had flagged yet.
+
+`organiser-agent.cpp` deliberately binds loopback-only:
+```cpp
+addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+```
+with a comment explaining that the entire security model depends on
+this — the SSH-tunnel-based architecture only works because the agent
+is *unreachable* except through that tunnel.
+
+`organiser-agent.py` instead does:
+```python
+app.run(host="0.0.0.0", port=PORT, debug=False)
+```
+
+**Confirmed by starting the real subprocess** (not just reading the
+source): its own startup banner reports `Running on all addresses
+(0.0.0.0)` and lists a real, non-loopback interface address as directly
+reachable, right alongside `127.0.0.1`.
+
+**This directly contradicts comments in the same file**, in two
+separate places:
+- Near `/config`: *"It relies on the same loopback binding as every
+  other endpoint here for its access control."*
+- Near `/admin`: *"This mirrors how the other endpoints are protected:
+  loopback bind + optional secret header."*
+
+Both describe a security property the code does not have. Whoever wrote
+those comments (most plausibly while porting the config-dashboard
+feature from the C++ version, per broadcast [0006]) evidently believed
+this file shared the C++ version's loopback-only binding and never
+checked that `app.run(host="0.0.0.0", ...)` says otherwise.
+
+**Compounding factor, also newly discovered this session:** the file's
+own startup banner instructs the user to run `ngrok http <port>` and
+publish the resulting public URL as `ORGANISER_URL` — a deployment model
+`ARCHITECTURE.md` already correctly flags as stale/unused. If anyone
+*did* follow that instruction, this agent would be reachable from the
+public internet, not just the LAN — at which point finding 3
+(no-secret-configured = fully open) and finding 20 (unauthenticated
+`/config` can permanently hijack) would apply to **anyone on the
+internet who finds the URL**, not just someone with existing LAN or
+local-machine access.
+
+**Suggested fix (should this file ever be un-deprecated):**
+`host="127.0.0.1"`, matching the C++ version and the comments' own
+stated intent — a one-line change.
+
+Regression tests:
+`tests/test_organiser_agent_flask_security.py::test_flask_agent_binds_all_interfaces_not_loopback_only`
+(starts the real subprocess, reads its own banner) and
+`::test_flask_agent_comments_claim_loopback_binding_that_does_not_exist`
+(catches drift between the comments and the code either direction).
+
+**Docs staleness noted, not fixed by me:** both `ARCHITECTURE.md` and
+`README.md` currently say `organiser-agent.py` "has no path-traversal/
+protected-path checks" — independently confirmed **false** as of this
+session (`_reject_if_protected` is applied across `list`, `move`,
+`delete`, `preview`, `disk_usage`, `duplicates`, `screenshot`,
+`write_file`, and `read_file_b64` — same coverage pattern as the C++
+version). Flagging this drift for whoever owns docs next, rather than
+editing `ARCHITECTURE.md`/`README.md` myself, since that's outside this
+engagement's scope.

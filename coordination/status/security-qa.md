@@ -15,6 +15,25 @@ file. I'm not editing BROADCAST.md myself (it's lead-only per its own
 header), but given severity and that pc-agent may still be iterating on
 this feature, flagging here as prominently as I can for you to relay.
 
+## ⚠️ ALSO FOR LEAD — finding 25, organiser-agent.py binds 0.0.0.0
+Newly discovered: organiser-agent.py's own comments (near /config and
+/admin) explicitly claim "the same loopback binding as every other
+endpoint here" is its access-control model -- but the actual code is
+`app.run(host="0.0.0.0", ...)`, confirmed live via the real subprocess's
+own startup banner ("Running on all addresses"). This is a genuine
+code/comment mismatch, not something I'm inferring. Severity is mitigated
+by ARCHITECTURE.md/BUILD_AND_SETUP.md already saying "legacy, do not
+deploy" for this file -- so I'm not asking for urgent action, just
+flagging it for whoever eventually revisits organiser-agent.py (or if
+anyone's tempted to un-deprecate it now that it has path protection,
+which is itself a separate stale-docs correction -- see below). Also
+found while looking at this: ARCHITECTURE.md and README.md both still
+say organiser-agent.py "has no path-traversal protection" -- independently
+confirmed FALSE this session (_reject_if_protected is applied across all
+9 file-touching handlers, same pattern as the C++ side). Not editing
+those docs myself, flagging the drift for whoever owns them next. Full
+details in SECURITY_FINDINGS.md findings 24 and 25.
+
 ## Done
 - Re-verified the admin-cookie-forgery fix (b28ab02) independently; still
   holds. Searched for the same bug shape elsewhere in server.py — found
@@ -303,3 +322,45 @@ as a dangling unresolved question).
   finding 15 (DNS-rebinding host header in real production) still
   stands, unused so far -- the Windows work and this re-verification
   round took priority.
+
+## Update: systematic sweep of organiser-agent.py (Flask) -- two new findings
+Did the same systematic pass on the Flask implementation that I'd already
+done for the C++ one (auth, injection, path handling, binding). Confirmed
+its run_command/working_dir is safe by design (subprocess.run with a
+list + cwd=, never shell=True) -- no C++-style injection risk exists
+here at all, architecturally. Then found:
+
+- **Finding 24**: /preview opens files with errors="replace", so a
+  genuinely binary file returns HTTP 200 with SILENTLY corrupted content
+  (U+FFFD replacement characters) instead of a clean error. Worse: the
+  raw HTTP response bytes are themselves already valid UTF-8 (replacement
+  happened before serialization), so the exact safety net that
+  accidentally saves the C++ version (a downstream strict-decode hop)
+  would see nothing wrong here either. This directly matters for
+  broadcast [0008]'s "PC binary transfers must fail cleanly, not corrupt"
+  ask -- true for file_transfer (uses the binary-safe /read_file_b64),
+  NOT true for the separately-exposed pc_read_file_preview tool on this
+  implementation.
+- **Finding 25**: organiser-agent.py binds 0.0.0.0 (all interfaces),
+  confirmed via the real subprocess's own startup banner, directly
+  contradicting two of its own comments that explicitly claim "loopback
+  binding" as the access-control model. Also discovered its startup
+  banner tells users to expose it via ngrok to the public internet.
+  Severity is real but mitigated -- ARCHITECTURE.md/BUILD_AND_SETUP.md
+  already say "legacy, don't deploy" for this file. While checking this
+  I also found ARCHITECTURE.md/README.md's claim that this file "has no
+  path-traversal protection" is now STALE (it was added) -- flagged for
+  whoever owns docs next, not editing them myself.
+
+8 tests total in tests/test_organiser_agent_flask_security.py now (was
+6), all passing. Full suite: 164 passing + 1 xfailed.
+
+## Next
+- User's offer to use the codespace + a Render test deployment for
+  finding 15 (DNS-rebinding host header in real production) still
+  stands, unused so far.
+- Could look at hub-cicd's new commits (2ab1090, not yet merged to main)
+  once/if that lands, per the standing "attempt the same categories
+  once X lands" pattern -- CI/config-CLI territory is a different shape
+  of attack surface than anything tested so far, worth a fresh look
+  when it's actually on main.
