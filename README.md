@@ -91,24 +91,26 @@ deployment.
 
 ## Known limitations
 
-The full, honest list lives in **`ARCHITECTURE.md`**. Highlights:
+The full, honest list lives in **`ARCHITECTURE.md`**, with a
+per-finding status table cross-checked directly against the current
+code (not just commit messages). Highlights:
 
-- `organiser-agent.py` (the Python build) has no path-traversal/
-  protected-path checks. Use `organiser-agent.cpp` for anything real.
 - `*_run_command` tools (PC and Linux server both) are intentionally
-  close to unrestricted shell access — treat their permission level
-  accordingly.
-- `file_transfer` can't yet move a binary file to/from a PC (fails
-  cleanly rather than corrupting — organiser-agent's file API is
-  text-only today).
+  close to unrestricted shell access by design — treat their permission
+  level accordingly. (A real, separate command-injection *bug* this
+  used to have via `working_dir` is fixed now — see ARCHITECTURE.md.)
+- `file_transfer`'s PC leg is binary-safe but capped at 40 KB (not the
+  general 15 MB) pending a real fix for a silent-truncation bug in
+  organiser-agent.cpp's raw request handling.
+- The SSH tunnel from the Linux server to each PC doesn't pin host
+  keys yet (`StrictHostKeyChecking=no`) — a fix exists but isn't merged
+  to `main` yet.
+- Secret comparison in both PC-agent builds isn't constant-time.
 - No CI test/lint pipeline for `server.py` yet.
-- **A confirmed, still-open command-injection bug in organiser-agent's
-  `/run_command`** (via `working_dir`, Linux-confirmed) — found by
-  `agent/security-qa`. A related `max_bytes` DoS in organiser-agent's
-  `/preview` has a server-side clamp already in `main` (defense in
-  depth), but the underlying agent-side bug isn't fixed yet. See
-  ARCHITECTURE.md's "Confirmed security findings" section before
-  relying on either endpoint.
+
+See ARCHITECTURE.md's "Security findings" section for the full,
+independently-verified status (fixed vs. still open) of every finding
+in `SECURITY_FINDINGS.md`.
 
 ## Local testing
 

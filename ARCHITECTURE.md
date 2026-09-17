@@ -110,214 +110,166 @@ corrupting any binary file. `file_transfer(source, destination)` moves
 bytes between any two of: `sandbox:<path>`, `server:<path>`,
 `pc:<name>:<path>`, `codespace:<name>[@account]:<path>` — in either
 direction, any pairing, transported as base64 so binary data survives.
-Capped at 15 MB per transfer. See `SKILL.md`'s Group 4 for the full
+Capped at 15 MB per transfer, **including PC transfers** — that cap
+used to be lowered to 40 KB for the `pc:` leg specifically as a
+workaround for a bug in organiser-agent.cpp (see finding 7 below); that
+bug is now genuinely fixed, and the cap was restored to match the
+general 15 MB limit. See `SKILL.md`'s Group 4 for the full
 address-format reference and examples.
 
-**Current limitation:** the `pc:` leg still goes through
-organiser-agent's `/preview`/`/write_file` endpoints, which are
-text-only — a binary file with a PC as either end fails cleanly rather
-than corrupting, but can't complete. This is tracked as PC-agent work
-(a base64-safe endpoint pair) in `coordination/tasks/pc-agent.md`.
+## organiser-agent: two implementations, now at genuine feature + safety parity
 
-## organiser-agent: two implementations, one is current
+Both builds (`organiser-agent.py` v1.2.0+, `organiser-agent.cpp`
+v2.1.0-cpp+) have: protected-path checks, machine identity
+(`machine_id`/`machine_name`), binary-safe transfer (`/read_file_b64`,
+`content_b64` on `/write_file`), an in-agent `/config`+`/admin`
+dashboard, a real `/run_command` timeout with process-tree cleanup, and
+(as of the latest `agent/pc-agent` merge) every SECURITY_FINDINGS.md
+issue that applied to them fixed except finding 3 (see below, a
+documented design choice) and finding 2 (Windows injection — the
+architectural fix is in place, but unverified by actual execution, no
+Windows box available anywhere in this project). The only remaining
+practical difference is resource footprint:
 
 | | `organiser-agent.py` | `organiser-agent.cpp` |
 |---|---|---|
-| Status | Legacy reference implementation | **The one actually deployed/documented** |
-| Runtime | Python + Flask + send2trash | Zero-dependency C++ (winsock2 on Windows) |
+| Runtime | Python + Flask (+ optional `send2trash`) | Zero-dependency C++ (winsock2 on Windows) |
 | Idle footprint | ~50 MB RAM | ~2 MB RAM, 0% CPU |
-| Windows system-dir protection on file ops | **None** | Yes — every file-touching endpoint (`/list`, `/move`, `/delete`, `/preview`, `/disk_usage`, `/write_file`) rejects paths inside the real Windows directory (queried via `GetWindowsDirectoryA`, not hardcoded) |
-| `/run_command` protection | N/A (no protection anywhere) | **Deliberately unprotected** — there's no reliable way to string-parse arbitrary shell/PowerShell text to know if it'll touch a protected path, so this endpoint has full reach by design |
-| Deployment model described in its own header comment | ngrok + `ORGANISER_URL` (**stale** — doesn't match how traffic actually reaches it, see "PC routing" above) | Task Scheduler + the tailscale-ssh-tunnel model (accurate) |
-| Machine identity | None | None — `/status` returns version/platform, not a name (see `coordination/tasks/pc-agent.md`) |
-| File transfer safety | N/A | `/preview` and `/write_file` are text-only today — the reason for `file_transfer`'s PC-side limitation above |
+| Everything in SECURITY_FINDINGS.md that applies to this file | Fixed (mostly never applicable — see below) | Fixed |
+| Deployment model described in its own header comment | Still **stale** — describes ngrok + `ORGANISER_URL`, not the tailscale-ssh-tunnel model actually used (see "PC routing" above). Nobody's fixed this doc comment yet, unlike everything else | Accurate |
 
-**If you're setting up a new PC, build and run `organiser-agent.cpp`**
-(or use `scripts/install-organiser-agent.ps1`, which fetches a prebuilt
-release). `organiser-agent.py` is kept in the repo as a reference/
-prototype; its own setup instructions describe a different,
-no-longer-used deployment model and it lacks the path protections the
-C++ build has. Don't run it as your production agent.
+Worth knowing even though it no longer changes which one is "safe to
+run": the Python build's `subprocess.run(..., cwd=working_dir,
+timeout=60)` was *architecturally* never vulnerable to findings 1/2 in
+the first place (a real function argument, never shell text), and
+Flask/Werkzeug's own request handling meant finding 7's raw-socket
+buffer bug never applied to it either — not a fix so much as a
+different implementation approach that happened to sidestep two whole
+bug classes.
 
-## Deployment target: Render (documented/supported); Fly: present, unconfirmed
+**Pick based on footprint or convenience** — C++ if ~2 MB idle/0% CPU
+matters, Python if you'd rather not set up an MSVC toolchain.
+`scripts/install-organiser-agent.ps1` (`BUILD_AND_SETUP.md` §1b)
+fetches the C++ build specifically; there's no equivalent installer for
+the Python build yet.
 
-Everything actually wired up — the `/admin` dashboard's Render API
-calls, the hardcoded default `RENDER_SERVICE_ID`, every setup doc — is
-Render-specific. `fly.toml` and the generic `Dockerfile` are present in
-the repo and would plausibly work on Fly (`server.py` auto-detects
-`FLY_APP_NAME` for `MCP_ALLOWED_HOST` the same way it does
-`RENDER_EXTERNAL_HOSTNAME`), but nothing in this docs pass could confirm
-a Fly deployment is actually live or maintained. Treat Render as the
-supported path until `coordination/status/hub-cicd.md` says otherwise.
+## Deployment target: Render (confirmed)
+
+Render is the confirmed, supported, actually-deployed target —
+resolved by `agent/hub-cicd` (see `render.yaml` at repo root and
+`coordination/status/hub-cicd.md`). Everything actually wired up — the
+`/admin` dashboard's Render API calls, the hardcoded default
+`RENDER_SERVICE_ID` (matching the real live service), every setup doc —
+is Render-specific. `fly.toml` is kept in the repo (not deleted — a
+bigger, less reversible call than documenting its status) but is now
+explicitly marked in its own header comment as unconfirmed/likely-legacy:
+`server.py` would plausibly still work on Fly (it auto-detects
+`FLY_APP_NAME` the same way it does `RENDER_EXTERNAL_HOSTNAME`), but
+nothing in this project's history confirms a Fly deployment is actually
+live, tested, or maintained.
 
 ## Known limitations
 
-> `write_codespace_file` used to always report success even when its
-> target directory didn't exist yet — fixed in commit `7dc1695` (it now
-> `mkdir -p`s the parent and checks for an explicit success marker). Not
-> listed below anymore since it's no longer true.
-
-- **organiser-agent.py lacks path protection.** Covered above — don't
-  run it in production.
-- **`file_transfer`'s PC leg is text-only.** Covered above. (The underlying binary-safe agent endpoints now exist on `agent/pc-agent`, pending merge + server.py wiring — see "Pending: agent/pc-agent's fixes" below.)
+- **`/run_command` (both agent builds, and `server_run_command`) is
+  intentionally close to unrestricted by design.** `server_run_command`'s
+  blocklist is explicitly documented in-code as "a footgun-prevention
+  nicety, not a real security boundary." Treat every `*_run_command`
+  tool as equivalent to a real shell on that machine. (This is a design
+  choice, not a bug — the *bug* this used to be paired with, the
+  `working_dir` shell injection, is fixed; see "Security findings.")
+- **No secret configured on an agent means its auth check is skipped
+  entirely**, not fail-closed (SECURITY_FINDINGS.md finding 3) — the
+  one finding pc-agent deliberately left as-is rather than "fixing":
+  it's explicitly documented behavior (prints `"Auth: NO SECRET
+  (open)"` at startup), and mitigated by the tunnel being loopback-only
+  by design. Worth knowing if you ever run an agent without setting
+  `ORGANISER_SECRET`, not something anyone's actively planning to change.
 - **PC secret pairing isn't enforced.** The `PCS` registry's `secret`
   for a given PC name must be manually kept in sync with that PC's own
-  `ORGANISER_SECRET`. Nothing on either side verifies the pairing is
-  correct beyond the header check itself — set them to matching values
-  when you provision a PC, and there's no drift-detection if one side
-  changes later. `run_diagnostics` will report a 401/timeout if they've
-  drifted, but won't tell you *why*.
-- **No PC identity/registration handshake.** An agent doesn't know its
-  own configured name; it's implicit in which tunnel/port you're
-  routing through. Addressed on `agent/pc-agent` (machine_id/
-  machine_name via `/status`), pending merge — see "Pending:
-  agent/pc-agent's fixes" below.
-- **`/run_command` (both agent builds, and `server_run_command`) is
-  intentionally close to unrestricted.** `server_run_command`'s blocklist
-  is explicitly documented in-code as "a footgun-prevention nicety, not
-  a real security boundary." Treat every `*_run_command` tool as
-  equivalent to a real shell on that machine. This is a deliberate design
-  choice, not a bug — but see the next item for a *specific, confirmed*
-  vulnerability in how one of its arguments is handled, which is a bug.
+  `ORGANISER_SECRET`. Nothing on either side verifies the pairing beyond
+  the header check itself. (`agent/pc-agent` looked into whether this
+  needs fixing and concluded there's no *architectural* ambiguity for
+  the agent side to resolve — one process is one physical machine with
+  one secret — which is fair, but doesn't change that nothing catches a
+  typo across the two sides at provisioning time.)
+- **`file_transfer`'s read side has no upfront size cap** (finding 8) —
+  an oversized *source* is fully read (and, for `server:`/`codespace:`
+  kinds, base64-decoded) before the size limit is checked, rather than
+  checked incrementally or upfront.
 - **`create_git_commit_and_push` only stages already-tracked files**
   (`git add -u`) — brand-new untracked files need an explicit `git add`
   first.
-- **No CI test/lint step for `server.py` yet** — the tests exist
-  (77 passing across 7 files under `tests/`, verified locally with
-  `pytest tests/` as of this writing) but nothing runs them
-  automatically on push/PR. `.github/workflows/release.yml` runs them
-  as part of a tagged release, which is a different thing (see its own
-  in-file note). See `coordination/status/hub-cicd.md` for whether a
-  real CI workflow has landed.
-- **Fly vs Render** — see above.
-- **No rate limiting** on the MCP bearer-token check beyond the
-  constant-time comparison itself; a very determined attacker with
-  network access could still attempt many guesses over time.
-- **Admin dashboard is single-admin by design** — one shared password,
-  one HMAC secret, no per-user accounts. Fine for personal
-  infrastructure, not intended for multiple distinct admins.
+- **DNS-rebinding host check has no port wildcard** (finding 15) — a
+  request with a port in its `Host` header (`127.0.0.1:18010`, which is
+  how virtually every local/self-hosted setup looks) gets rejected even
+  with a correct password. Fails *closed* (not a vulnerability), but
+  will confuse anyone testing this locally — see `SECURITY_FINDINGS.md`
+  finding 15 before "fixing" this by weakening the DNS-rebinding check
+  itself, which would be a real regression.
+- **No rate limiting** on the MCP bearer-token check (or the admin
+  dashboard's login) beyond the constant-time comparison itself.
+- **Admin dashboard is single-admin by design**, and shares its secret
+  with the MCP bearer token unless `ADMIN_PASSWORD`/`ADMIN_COOKIE_SECRET`
+  are set separately — by design, not a bug (finding 11).
+- **No CI test/lint step for `server.py` yet** — the tests exist (116:
+  115 passing + 1 expected-fail, across 8 files under `tests/`, verified
+  locally with `pytest tests/` as of this writing — needs
+  `requirements-test.txt` + `pytest.ini`, see below) but nothing runs
+  them automatically on push/PR yet. `agent/hub-cicd` is active (their
+  first commit resolved the Fly-vs-Render question above) but hasn't
+  landed CI itself yet — check `coordination/status/hub-cicd.md` for
+  current state.
 
-## Confirmed security findings (agent/security-qa)
+## Security findings (agent/security-qa + agent/pc-agent) — current status
 
-`agent/security-qa`'s findings are now merged to `main` — see
-`SECURITY_FINDINGS.md` at repo root for full detail, severities, and
-suggested fixes, and `coordination/status/security-qa.md` for how each
-was verified. Summarizing the confirmed, actionable ones here so they
-aren't easy to miss:
+Full detail, severities, and fix history for all 17 numbered findings
+are in `SECURITY_FINDINGS.md` at repo root. Independently re-verified
+directly against the actual current code for this pass (not just read
+from commit messages or trusted from either subagent's own report):
 
-- **Command injection via `working_dir` in organiser-agent's
-  `/run_command`** (separate from, and worse than, the "intentionally
-  unrestricted by design" point above — this is an argument-handling
-  bug, not a design choice). Confirmed exploitable on Linux; the
-  equivalent Windows path is suspected but **unverified** (no Windows
-  test target was available for that pass).
-- **`/preview`'s `max_bytes` is unbounded and pre-allocates before
-  checking the real file size**, causing a crash-the-process DoS in
-  organiser-agent — confirmed. **Partially fixed**: `server.py`'s
-  `pc_read_file_preview` now clamps `max_bytes` to 2 MB server-side
-  (commit `7dc1695`), closing the path reachable from an ordinary MCP
-  tool call. The underlying bug — organiser-agent itself allocating
-  before checking the real file size — is **still open** at the agent
-  level; it's pc-agent's scope to fix for real, and the server-side
-  clamp is explicitly documented in-code as defense in depth, not a
-  substitute for that.
-- **organiser-agent's secret comparison isn't constant-time**, unlike
-  `server.py`'s `hmac.compare_digest` everywhere else in this project —
-  a timing side-channel on the PC-agent secret specifically.
-- **Oversized request bodies to organiser-agent (>~64KB) are silently
-  truncated and still report success** — confirmed by sending a 200KB
-  body and getting a corrupted 65,333-byte file back with an HTTP 200.
-  This is a silent-data-corruption bug, not just a size-limit gap.
-- **`pc-tunnel@.service` uses `StrictHostKeyChecking=no`** — a low-severity
-  LAN MITM exposure.
-- ~~`file_transfer` has two silent-fallback footguns~~ — **fixed** in
-  commit `7dc1695`: an empty PC/codespace name now raises a clear error
-  at parse time instead of silently resolving to `"default"`, and
-  `_get_token` (used by every tool with an `account=` parameter, not
-  just `file_transfer`) now rejects any string outside
-  `{auto, primary, secondary, tertiary}` instead of silently treating it
-  the same as `"auto"`.
-- **`file_transfer`'s read side has no upfront size cap** — the write
-  side enforces the 15 MB limit documented above, but an oversized
-  *source* is fully read and base64-decoded before being rejected,
-  rather than being rejected up front.
+| # | Finding | Status (independently verified) |
+|---|---|---|
+| 1 | `working_dir` shell injection (Linux) | **Fixed** — `chdir()` in a forked child, no shell string; verified in `organiser-agent.cpp` |
+| 2 | Same, Windows (hypothesized) | **Architecturally fixed** — verified `cwd` is passed via `CreateProcessA`'s `lpCurrentDirectory` parameter, never concatenated into the command string — but still unverified *by execution*, no Windows box available |
+| 3 | No secret = auth skipped entirely | Open by design — see "Known limitations" |
+| 4 | `/preview` `max_bytes` unbounded, chains through server.py | **Fixed, both halves** — verified `h_preview` now clamps to a hard ceiling AND the real file size before allocating; `server.py`'s `pc_read_file_preview` also clamps before forwarding |
+| 5 | Secret comparison not constant-time | **Fixed** — verified a `constant_time_equal()` function now exists and is used in `organiser-agent.cpp`; `organiser-agent.py` uses `hmac.compare_digest` |
+| 6 | `StrictHostKeyChecking=no` | **Fixed** — verified `pc-tunnel@.service` now uses `StrictHostKeyChecking=yes` + a per-PC `UserKnownHostsFile` |
+| 7 | Oversized body silently truncated (64KB buffer) | **Fixed** — verified `organiser-agent.cpp`'s `handle_conn` now reads headers first, checks `Content-Length` against a real ceiling, and reads exactly that many bytes in a loop rather than stopping at a fixed buffer. `server.py`'s PC-transfer cap was restored from its 40KB workaround back to the general 15MB limit accordingly |
+| 8 | `file_transfer` read side, no upfront cap | Open |
+| 9 | Malformed address / unknown account silently degrades | **Fixed** — verified directly in `server.py` (`_get_token`, address parsing) |
+| 10 | Admin-cookie forgery (original bug) | Already fixed before this pass; re-verified |
+| 11 | Shared secret across MCP/admin boundaries | By design, not a bug |
+| 12 | Shell-injection sweep of server.py | No issues found |
+| 13 | PC binary transfer failure mode | Verified true (moot now for size reasons too — finding 7's fix means large binary PC transfers now actually succeed rather than needing the clean-failure path as often, though the failure-mode guarantee itself is unchanged) |
+| 14 | Query-string parser doesn't URL-decode | Behavioral quirk, not a vulnerability |
+| 15 | DNS-rebinding host check has no port wildcard | Open, fails closed (not a vulnerability, but confusing) |
+| 16 | Session ID alone doesn't bypass bearer-token check | Confirmed secure |
+| 17 | MCP wire-protocol fuzzing | No issues found |
 
-Also worth knowing, as reassurance rather than a limitation: security-qa
-independently **verified** (not just re-asserted) this doc's claim that
-a binary file with a PC as either end of `file_transfer` fails cleanly
-rather than corrupting — they traced the actual mechanism (organiser-agent's
-raw binary response is invalid UTF-8, which the Linux-server hop's strict
-decode step catches and turns into a clean error before it ever reaches
-`server.py`). They also ran full adversarial fuzzing against the real MCP
-JSON-RPC wire protocol (malformed envelopes, wrong-type tool arguments,
-oversized/null-byte/unicode input) with no crashes or leaked internals,
-and confirmed a leaked session ID alone doesn't bypass the bearer-token
-check. One usability-only finding from that pass: the DNS-rebinding
-`allowed_hosts` check has no port wildcard, so a Host header with a port
-gets rejected even with the correct password — breaks routine local
-testing (fails closed, not a security bug, but worth knowing if `/mcp`
-seems to reject valid local requests).
-
-## Pending: agent/pc-agent's fixes (landed on their branch, not yet merged to main)
-
-`agent/pc-agent` has pushed 4 commits addressing several of the gaps
-above, tested against a compiled Linux build (see
-`coordination/status/pc-agent.md` on that branch for full test detail —
-33 new tests, one explicit `expectedFailure` for a POSIX-vs-Windows
-path-semantics artifact that can only be confirmed on real Windows).
-**None of this is on `main` yet** — everything below is what will
-change once it's merged, not current behavior:
-
-- **Machine identity**: `/status` on both agent builds now returns a
-  persistent `machine_id`/`machine_name`, addressing "No PC
-  identity/registration handshake" above. `server.py`'s `PCS` registry
-  remains the source of truth for hub-side routing — this doesn't
-  replace it, it just lets the agent know its own name too.
-- **Binary-safe file transfer endpoints**: a new `/read_file_b64` (GET)
-  and a `content_b64` field on `/write_file` (POST), verified
-  byte-identical round-trip in testing. **This does not yet fix
-  `file_transfer`'s PC-side text-only limitation on its own** — that
-  wiring lives in `server.py` (calling these new endpoints instead of
-  `/preview`/`/write_file`'s old text-only form), which is outside both
-  pc-agent's and this docs pass's scope. Until someone wires it,
-  `file_transfer` still can't move binary data to/from a PC even after
-  this merges.
-- **A local `/config` + `/admin` dashboard on the agent itself**,
-  letting `machine_name`/`secret` be set without hand-editing env vars
-  or the Scheduled Task — hot-reloads without a restart. An
-  environment-variable secret still wins over a config-file one if both
-  are present.
-- **`organiser-agent.py` now has the same protected-path guard
-  `organiser-agent.cpp` already had** — the "legacy build has no path
-  protection" gap in the comparison table above no longer applies once
-  this merges (it remains true of the version on `main` today).
-- **A real, verified bug fix**: `organiser-agent.cpp`'s `/run_command`
-  had no timeout at all (`popen()` blocks until the child exits,
-  indefinitely) — confirmed by actually hanging a `sleep 90` against a
-  60s deadline and watching the process group get killed via `ps aux`.
-  Fixed for the POSIX path; the equivalent Windows fix (Job Objects) is
-  code-reviewed but **not compiled or run** — no Windows toolchain was
-  available to verify it.
-- On the "PC secret pairing isn't enforced" point above: pc-agent looked
-  into this specifically and concluded there's no *architectural*
-  ambiguity to resolve (one agent process is one physical machine with
-  exactly one secret, so there's no "which PC's secret" question for the
-  agent side to answer) — worth knowing as context, though it doesn't
-  change the operational fact that nothing double-checks the two sides
-  were typed identically when you provision a PC.
+**Net effect: of the findings that represented real bugs (not design
+choices or already-secure behavior), only #8 (low-medium, `file_transfer`
+read-side cap) and #15 (usability, fails closed) remain open.** Finding
+3 is a deliberate, documented design choice, not an oversight. Finding 2
+is architecturally addressed but formally unverified for lack of a
+Windows test target — the one genuine gap in this project's testing
+coverage, called out consistently by every subagent that touched it
+rather than glossed over.
 
 ## Where things live (quick map)
 
 | File | Role |
 |---|---|
 | `server.py` | The MCP server — every tool definition, the admin dashboard, all auth |
-| `organiser-agent.cpp` | Windows PC agent — build and run this one |
-| `organiser-agent.py` | Legacy reference implementation — do not deploy |
+| `organiser-agent.cpp` | Windows PC agent, C++ build — lower footprint, see comparison above |
+| `organiser-agent.py` | Windows PC agent, Python build — same safety features, higher footprint, see comparison above |
 | `pc-tunnel@.service` | systemd template, one instance per configured PC |
 | `scripts/install-organiser-agent.ps1` | Fetches, verifies, and installs a release build of the PC agent |
 | `Dockerfile`, `start.sh` | Container build/entrypoint for server.py |
-| `fly.toml` | Fly.io config (see "Deployment target" above) |
+| `render.yaml` | Render Blueprint — documents the full env var surface for a working deployment; the live service predates this file |
+| `fly.toml` | Present but unconfirmed/likely-legacy — see "Deployment target" above |
 | `.secrets.example` | Full list of every optional/required env var, for local runs |
-| `tests/` | 7 files, 77 tests, run with `pytest tests/` (needs `requirements-test.txt` + `pytest.ini`'s `asyncio_mode = auto` — see below) |
-| `pytest.ini`, `requirements-test.txt` | Test-only deps + the asyncio-mode config every `@pytest.mark.asyncio` test needs — without both, several tests fail with a misleading error instead of a clean pass |
+| `SECURITY_FINDINGS.md` | Full detail on all 17 security findings and their fix status |
+| `tests/` | 8 files, 116 tests (115 pass + 1 expected-fail), run with `pytest tests/` |
+| `pytest.ini`, `requirements-test.txt` | Test-only deps (pytest, pytest-asyncio, flask, send2trash) + the asyncio-mode config every `@pytest.mark.asyncio` test needs. Without `pytest.ini`, several tests fail with a misleading error instead of a clean pass; without `flask`, `tests/test_organiser_agent.py` fails to even *collect*, aborting the whole run |
 | `coordination/` | Multi-agent build coordination — not part of the shipped product |

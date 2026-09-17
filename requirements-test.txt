@@ -15,5 +15,10 @@ pytest-asyncio>=0.24
 # send2trash (organiser-agent.py's other import) is NOT listed here on
 # purpose -- it's wrapped in its own try/except ImportError in that file
 # and the tests cover the "not installed" path deliberately, so adding it
-# here would silently stop testing that fallback.
+# here would silently stop testing that fallback. (docs-release
+# independently proposed adding it during a merge -- dropped here since
+# no test actually exercises the real-library path, so it would only
+# reduce fallback-path coverage with no corresponding gain. If a future
+# test genuinely needs the real send2trash behavior, add it back with a
+# comment explaining which test needs it.)
 flask>=3.0
