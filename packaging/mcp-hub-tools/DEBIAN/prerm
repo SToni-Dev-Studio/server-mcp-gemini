@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove|purge)
+    if [ -x /usr/bin/systemctl ] && [ -d /run/systemd/system ]; then
+      active=$(systemctl list-units --type=service --state=active --no-legend 'pc-tunnel@*.service' 2>/dev/null | awk '{print $1}')
+      if [ -n "$active" ]; then
+        echo "mcp-hub-tools: the following tunnels are still active and will stop working" >&2
+        echo "once this package's pc-tunnel@.service template is removed:" >&2
+        echo "$active" | sed 's/^/  /' >&2
+        echo "(not blocking removal -- stop them yourself first if that matters: systemctl stop <unit>)" >&2
+      fi
+    fi
+    ;;
+esac
+
+exit 0

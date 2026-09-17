@@ -1,0 +1,97 @@
+mcp-hub-tools
+=============
+
+Hub-side tools for the server-mcp-claude project's Windows-PC tunnel
+fleet. Installs:
+
+  /usr/bin/hub-cli          -- manage PC tunnel config, pin SSH host
+                                keys, read/write the Render-hosted
+                                service's env vars
+  /usr/bin/hub-diagnostics  -- local health checks (tunnel services,
+                                port reachability, Tailscale, disk space)
+  /lib/systemd/system/pc-tunnel@.service
+                             -- the systemd template each configured PC
+                                gets an instance of
+
+Quick start
+-----------
+Add a new PC:
+
+    sudo hub-cli pc add desktop 192.168.1.50
+    sudo hub-cli pc pin desktop
+    sudo hub-cli render set PCS '{"desktop": {"port": 7842, "secret": "..."}}'
+
+Check everything's healthy:
+
+    hub-diagnostics
+
+See `hub-cli --help` / `hub-diagnostics --help` for the full command
+list.
+
+Tailscale SSH ACL gotcha
+-------------------------
+If the hub reaches your home server over Tailscale SSH (rather than a
+plain key-based SSH the hub already trusts), Tailscale's DEFAULT ACL
+action for SSH is "check", which requires interactive approval in a
+browser the first time a connection is made. In an automated context
+(this project's Render-hosted MCP server calling in on a schedule, or
+this package's own autoupdate timer, or anything else non-interactive)
+that "check" just hangs for about 60 seconds and then fails -- there's
+no browser to approve it in.
+
+Fix: in your Tailscale ACL policy, change the relevant ssh rule's
+action from "check" to "accept" for this use case:
+
+    "ssh": [
+      {
+        "action": "accept",
+        "src": ["..."],
+        "dst": ["..."],
+        "users": ["..."]
+      }
+    ]
+
+This was hit for real during this project's first live end-to-end
+verification (MCP client -> Render -> Tailscale -> home server -> real
+command execution) -- worth doing this BEFORE your first automated run,
+not after watching it hang once.
+
+Auto-update
+------------
+A systemd timer (`mcp-hub-tools-autoupdate.timer`) can check GitHub
+Releases daily for a newer version of this package and install it
+automatically. It is DISABLED by default -- installing this package
+does not opt you into automatic self-modification.
+
+To enable it:
+
+    sudo systemctl enable --now mcp-hub-tools-autoupdate.timer
+
+What it actually does (read this before enabling): once a day (plus up
+to a 1-hour random delay, to avoid every install hitting GitHub's API
+at exactly the same moment), it checks the latest GitHub Release for
+this repo, and if the tag is newer than what's installed, downloads the
+.deb asset, verifies it against the SHA256 checksum GitHub publishes
+alongside it, and runs `dpkg -i`.
+
+Trust model, stated plainly: this authenticates the download CHANNEL
+(HTTPS to github.com, checksum-verified against what GitHub itself
+published) but the .deb is not GPG-signed. This does not protect
+against a compromised GitHub account or repo pushing a malicious
+release -- the same trust model as most small projects'
+`curl | bash`-style installers, made explicit here rather than implied.
+If that trade-off doesn't work for your threat model, leave the timer
+disabled and update manually (`sudo dpkg -i <downloaded .deb>`) after
+reviewing each release yourself.
+
+Uninstalling
+-------------
+`apt remove mcp-hub-tools` stops the autoupdate timer but keeps your
+`/etc/pc-tunnel/` config (conf files + pinned host keys) in place, in
+case you're reinstalling rather than actually decommissioning.
+
+`apt purge mcp-hub-tools` removes that config too. If any
+`pc-tunnel@<name>.service` instances are still active when you
+remove/purge, you'll get a warning listing them (their tunnels will
+stop working once the template unit file is gone) -- it doesn't block
+removal, just tells you.

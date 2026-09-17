@@ -1,0 +1,29 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  remove)
+    if [ -x /usr/bin/systemctl ] && [ -d /run/systemd/system ]; then
+      systemctl disable --now mcp-hub-tools-autoupdate.timer >/dev/null 2>&1 || true
+    fi
+    ;;
+  purge)
+    if [ -x /usr/bin/systemctl ] && [ -d /run/systemd/system ]; then
+      systemctl disable --now mcp-hub-tools-autoupdate.timer >/dev/null 2>&1 || true
+    fi
+    # Config/state is only removed on purge, not plain remove -- standard
+    # Debian convention, and specifically matters here because
+    # /etc/pc-tunnel/*.conf and known_hosts.d/* represent real, possibly
+    # painstakingly-set-up state (pinned host keys especially -- losing
+    # those on an accidental `apt remove` instead of `apt purge` would be
+    # a bad surprise, not just an inconvenience).
+    rm -rf /etc/pc-tunnel
+    rm -rf /etc/hub-cli
+    ;;
+esac
+
+if [ -x /usr/bin/systemctl ] && [ -d /run/systemd/system ]; then
+  systemctl daemon-reload || true
+fi
+
+exit 0

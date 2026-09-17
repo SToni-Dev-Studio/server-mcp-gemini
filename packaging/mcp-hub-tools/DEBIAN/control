@@ -1,0 +1,20 @@
+Package: mcp-hub-tools
+Version: __VERSION__
+Section: admin
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.10), openssh-client, systemd
+Recommends: tailscale
+Maintainer: server-mcp-claude project <noreply@example.invalid>
+Homepage: https://github.com/mienkek13-netizen/server-mcp-claude
+Description: Hub-side tools for the server-mcp-claude Windows-PC tunnel fleet
+ Installs hub-diagnostics.py (local health checks for pc-tunnel@.service
+ instances, Tailscale, and disk space) and hub-cli.py (manage PC tunnel
+ config, pin SSH host keys, and read/write the Render-hosted service's
+ env vars) as /usr/bin/hub-diagnostics and /usr/bin/hub-cli, plus the
+ pc-tunnel@.service systemd template these tools manage.
+ .
+ Also installs an opt-in auto-update timer (disabled by default) that
+ checks GitHub Releases for a newer version of this package and
+ installs it automatically -- see /usr/share/doc/mcp-hub-tools/README
+ for how to enable it.

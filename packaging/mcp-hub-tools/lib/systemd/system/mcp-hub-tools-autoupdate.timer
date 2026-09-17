@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily check for mcp-hub-tools updates
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=1h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
