@@ -1,0 +1,91 @@
+name: CI
+
+# Runs lint + the full pytest suite on every push and PR -- this is the
+# workflow release.yml's own header comment explicitly asks for:
+#
+#   "NOTE for whoever lands agent/hub-cicd's CI workflow: the 'test' job
+#    below is intentionally minimal ... it is NOT meant to be the
+#    project's real lint/test CI. If a fuller pytest suite / lint step
+#    lands on main, prefer wiring that in here ... over maintaining two
+#    divergent test steps."
+#
+# This workflow is that fuller suite. It intentionally does NOT try to
+# build organiser-agent.exe with real MSVC (build-organiser-agent.yml and
+# release.yml's build-agent job already do that, on windows-latest, with
+# the real toolchain) -- instead it does a fast g++ syntax/compile check
+# on Ubuntu, which is enough to catch most real mistakes (typos, missing
+# includes, broken syntax) on every push/PR without needing a Windows
+# runner for quick feedback. This matters because build-organiser-agent.yml
+# only triggers on push to main, not on PRs -- so before this workflow
+# existed, a PR touching organiser-agent.cpp got ZERO build verification
+# until it actually landed on main.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+  # Lets release.yml call these same jobs as a reusable workflow instead
+  # of maintaining its own separate/divergent test step (see that file's
+  # header comment, and its "ci" job which calls this via
+  # `uses: ./.github/workflows/ci.yml`) -- so a release build runs the
+  # exact same lint+test+compile-check jobs, against the exact tagged
+  # commit, with zero duplicated step definitions to keep in sync.
+  workflow_call:
+
+jobs:
+  lint:
+    name: Lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ruff
+      # Rule selection lives in ruff.toml, not here -- see that file's
+      - name: Run ruff
+        run: ruff check .
+
+  test:
+    name: Test (pytest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt -r requirements-test.txt
+      - name: Run test suite
+        run: pytest tests/ -v
+
+  organiser-agent-syntax-check:
+    name: organiser-agent.cpp (g++ syntax check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: g++ syntax/compile check
+        # -fsyntax-only: fast, catches real mistakes (typos, missing
+        # includes, broken syntax) without needing to actually link.
+        # This is deliberately NOT a substitute for the real Windows
+        # MSVC build (build-organiser-agent.yml / release.yml's
+        # build-agent job) -- some of this file's Windows-specific API
+        # calls (CreateProcessA, Job Objects, etc.) only compile under
+        # #if IS_WIN, which this Linux run doesn't take, so this check
+        # only verifies the POSIX branch + shared code. It exists purely
+        # for fast PR feedback; the Windows build is still the real
+        # verification, and it still runs (on push to main / release
+        # tags) as before.
+        run: g++ -std=c++17 -O2 -Wall -fsyntax-only organiser-agent.cpp -lpthread
+
+  hub-diagnostics-shellcheck:
+    name: scripts/hub-diagnostics.py (compile check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile scripts/hub-diagnostics.py

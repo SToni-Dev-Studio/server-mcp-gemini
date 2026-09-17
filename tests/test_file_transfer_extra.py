@@ -12,7 +12,6 @@ replayed here verbatim to test server.py's handling of it end-to-end.
 """
 import asyncio
 import base64
-import importlib
 import os
 import sys
 

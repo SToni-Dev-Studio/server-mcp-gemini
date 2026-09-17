@@ -1,0 +1,19 @@
+# Ruff config for CI's lint step (.github/workflows/ci.yml).
+#
+# Deliberately scoped to E9 (syntax errors) + F (pyflakes: unused
+# imports, undefined names, etc.) -- rules that catch genuine bugs, not
+# style/formatting opinions. This project's existing files weren't
+# written with ruff in mind, and this branch's brief explicitly says not
+# to touch organiser-agent.py/.cpp internals or server.py's MCP tool
+# definitions -- a stricter default (ruff's own built-in default set, as
+# of the version this was written against, additionally flagged things
+# like blind `except Exception:` and blocking calls in async functions)
+# would make CI red for existing, working, intentional patterns rather
+# than for actual mistakes, which defeats the point of adding CI in the
+# first place. If the project wants stricter linting later, that's a
+# deliberate choice to make with its own PR, not a side effect of this
+# config's defaults changing between ruff versions.
+target-version = "py312"
+
+[lint]
+select = ["E9", "F"]
