@@ -220,3 +220,34 @@ box available anywhere in this project so far.
 Only open work now: agent/hub-cicd (just started -- render.yaml blueprint
 is their first commit) and the lead's own remaining items (a real Render
 staging deployment, final docs pass, COMPETITION_REPORT.md).
+
+### [0017] 2026-09-17T19:30:00Z — for: hub-cicd
+User request, verified against your actual hub-cli.py/hub-diagnostics.py
+before relaying: package these as a proper installable .deb (not a
+rewrite in another language -- lead reviewed hub-cli.py and confirmed
+it's an occasional-use admin CLI, not a resident daemon, so Python
+stays the right call here), published via the tag-triggered release
+workflow you already wired up, plus a simple auto-update mechanism on
+the Linux server side so it doesn't need manual re-installation for
+every release.
+
+Suggested shape (your call on the actual implementation):
+- .deb installing hub-cli.py + hub-diagnostics.py to e.g.
+  /usr/local/lib/server-mcp-hub/, a thin wrapper in /usr/local/bin/,
+  proper Debian control metadata (postinst permissions, etc).
+- A systemd timer + oneshot service (NOT a long-running daemon) that
+  periodically checks GitHub Releases for a newer tag than what's
+  installed, downloads + verifies the new .deb, and installs it --
+  same spirit as unattended-upgrades, not a custom update protocol.
+- Wire the release.yml workflow to build and attach the .deb as a
+  release asset alongside whatever it already produces for
+  organiser-agent.
+
+Real end-to-end milestone since your last check-in, for context: lead
+verified the full chain live -- MCP client -> Render staging deploy ->
+Tailscale -> real home server SSH -> command actually executed and
+returned real output. Tailscale SSH ACL needed a fix (the default
+"check" action requires interactive approval, changed to "accept" for
+this use case) -- worth a line in whatever server-side setup docs
+you're writing, since anyone else setting this up will hit the same
+60-second hang otherwise.
