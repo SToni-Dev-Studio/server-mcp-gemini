@@ -1109,6 +1109,23 @@ async def _location_read_bytes(loc: str) -> bytes:
             return f.read()
 
     if kind == "server":
+        # Check size BEFORE reading+base64-encoding the whole thing --
+        # without this, a huge source file gets fully read, encoded, and
+        # streamed back over SSH before the size check in file_transfer()
+        # ever runs, risking an OOM on this process rather than a clean
+        # upfront rejection (external review A10 / SECURITY_FINDINGS.md
+        # finding 8's other half -- the pc: leg was already capped
+        # upstream via max_bytes, server:/codespace: weren't).
+        size_str = (await _ssh_server(f"stat -c%s {_q(path)} 2>&1")).strip()
+        try:
+            size = int(size_str)
+        except ValueError:
+            raise ValueError(f"Could not stat '{path}' on server (got: {size_str[:200]!r})")
+        if size > _FILE_TRANSFER_MAX_BYTES:
+            raise ValueError(
+                f"'{path}' on server is {size} bytes, over the {_FILE_TRANSFER_MAX_BYTES} "
+                f"byte file_transfer limit -- rejected before reading, not after."
+            )
         b64 = await _ssh_server(f"base64 -w0 {_q(path)} 2>&1")
         try:
             return base64.b64decode(b64, validate=False)
@@ -1132,6 +1149,18 @@ async def _location_read_bytes(loc: str) -> bytes:
     if kind == "codespace":
         cs_name, _, account = name.partition("@")
         account = account or "auto"
+        # Same upfront-size-check reasoning as the server: kind above.
+        size_str = (await exec_command(cs_name, f"stat -c%s {_q(path)} 2>&1", account=account)).strip()
+        try:
+            size = int(size_str)
+        except ValueError:
+            raise ValueError(f"Could not stat '{path}' on codespace:{cs_name} (got: {size_str[:200]!r})")
+        if size > _FILE_TRANSFER_MAX_BYTES:
+            raise ValueError(
+                f"'{path}' on codespace:{cs_name} is {size} bytes, over the "
+                f"{_FILE_TRANSFER_MAX_BYTES} byte file_transfer limit -- rejected "
+                f"before reading, not after."
+            )
         b64_cmd = f"base64 -w0 {_q(path)} 2>&1"
         result = await exec_command(cs_name, b64_cmd, account=account)
         try:

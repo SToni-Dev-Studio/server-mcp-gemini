@@ -97,26 +97,25 @@ def test_size_limit_enforced_for_codespace_destination(monkeypatch):
         asyncio.run(srv._location_write_bytes("codespace:myspace:/tmp/x", data))
 
 
-def test_read_side_has_no_upfront_size_limit_for_server_kind(monkeypatch, tmp_path):
-    """Confirms (via code path, not just reading the source) that
-    _location_read_bytes for 'server:' will happily decode an
-    oversized base64 blob fully into memory -- the 15MB cap is only
-    ever enforced on the WRITE side, after the full read already
-    happened. This means a huge remote source file gets fully
-    read+decoded (and, for server:/codespace:, base64-inflated ~33%)
-    before file_transfer ever rejects it -- a real (if minor,
-    self-inflicted-by-the-same-caller) resource-exhaustion gap."""
-    huge = b"A" * (srv._FILE_TRANSFER_MAX_BYTES + 5_000_000)  # ~20MB, over cap
-    huge_b64 = base64.b64encode(huge).decode()
-
-    async def fake_ssh_server(cmd, timeout=30):
-        return huge_b64
+def test_read_side_now_has_upfront_size_limit_for_server_kind(monkeypatch):
+    """FIXED (external review A10, was: no upfront size check). Used to
+    document that _location_read_bytes for 'server:' would happily
+    decode an oversized base64 blob fully into memory before the 15MB
+    cap was ever checked, on the WRITE side, after the full read already
+    happened. Lead added a `stat -c%s` check before ever running the
+    base64 read -- see test_server_read_rejects_oversized_file_before_reading
+    for the direct proof the base64 command is never even issued."""
+    async def fake_ssh_server(cmd, timeout=60):
+        if "stat -c%s" in cmd:
+            return str(srv._FILE_TRANSFER_MAX_BYTES + 5_000_000)
+        pytest.fail("base64 read should never be reached for an oversized file")
 
     monkeypatch.setattr(srv, "_ssh_server", fake_ssh_server)
-    result = asyncio.run(srv._location_read_bytes("server:/tmp/huge-remote-file"))
-    # the read itself succeeds and returns the full oversized payload --
-    # proving no size check happened during the read.
-    assert len(result) == len(huge)
+    try:
+        asyncio.run(srv._location_read_bytes("server:/tmp/huge-remote-file"))
+        assert False, "should have raised ValueError"
+    except ValueError as e:
+        assert "over the" in str(e)
 
 
 # ---------------------------------------------------------------------------
@@ -224,3 +223,56 @@ def test_pc_read_file_preview_max_bytes_now_clamped(monkeypatch):
     monkeypatch.setattr(srv, "_org_get", fake_org_get)
     asyncio.run(srv.pc_read_file_preview("C:\\some\\file.txt", max_bytes=10_000_000_000))
     assert captured["params"]["max_bytes"] == srv._PC_PREVIEW_MAX_BYTES_CEILING
+
+
+def test_server_read_rejects_oversized_file_before_reading(monkeypatch):
+    """External review A10: server:/codespace: reads used to base64 the
+    WHOLE file before any size check ran. Now stats first and rejects
+    upfront."""
+    calls = []
+
+    async def fake_ssh_server(cmd, timeout=60):
+        calls.append(cmd)
+        if "stat -c%s" in cmd:
+            return str(srv._FILE_TRANSFER_MAX_BYTES + 1)
+        pytest.fail("should never reach the base64 read after a failed size check")
+
+    monkeypatch.setattr(srv, "_ssh_server", fake_ssh_server)
+    try:
+        asyncio.run(srv._location_read_bytes("server:/mnt/ssd/huge.iso"))
+        assert False, "should have raised"
+    except ValueError as e:
+        assert "over the" in str(e)
+    assert any("stat -c%s" in c for c in calls)
+    assert not any("base64 -w0" in c for c in calls), "read the file despite the size check failing"
+
+
+def test_server_read_allows_file_within_cap(monkeypatch):
+    async def fake_ssh_server(cmd, timeout=60):
+        if "stat -c%s" in cmd:
+            return "5"
+        if "base64 -w0" in cmd:
+            return base64.b64encode(b"hello").decode()
+        pytest.fail(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr(srv, "_ssh_server", fake_ssh_server)
+    result = asyncio.run(srv._location_read_bytes("server:/tmp/small.txt"))
+    assert result == b"hello"
+
+
+def test_codespace_read_rejects_oversized_file_before_reading(monkeypatch):
+    calls = []
+
+    async def fake_exec_command(cs_name, cmd, account="auto", timeout_seconds=60):
+        calls.append(cmd)
+        if "stat -c%s" in cmd:
+            return str(srv._FILE_TRANSFER_MAX_BYTES + 1)
+        pytest.fail("should never reach the base64 read after a failed size check")
+
+    monkeypatch.setattr(srv, "exec_command", fake_exec_command)
+    try:
+        asyncio.run(srv._location_read_bytes("codespace:my-space:/workspace/huge.bin"))
+        assert False, "should have raised"
+    except ValueError as e:
+        assert "over the" in str(e)
+    assert not any("base64 -w0" in c for c in calls)
