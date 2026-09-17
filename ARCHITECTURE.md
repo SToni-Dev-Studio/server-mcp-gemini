@@ -136,7 +136,8 @@ practical difference is resource footprint:
 | Runtime | Python + Flask (+ optional `send2trash`) | Zero-dependency C++ (winsock2 on Windows) |
 | Idle footprint | ~50 MB RAM | ~2 MB RAM, 0% CPU |
 | Everything in SECURITY_FINDINGS.md that applies to this file | Fixed (mostly never applicable — see below) | Fixed |
-| Deployment model described in its own header comment | Still **stale** — describes ngrok + `ORGANISER_URL`, not the tailscale-ssh-tunnel model actually used (see "PC routing" above). Nobody's fixed this doc comment yet, unlike everything else | Accurate |
+| Deployment model described in its own header comment | Still **stale** — describes ngrok + `ORGANISER_URL` (and its startup banner actively encourages ngrok exposure to the public internet), not the tailscale-tunnel-only model documented here. Nobody's fixed this doc comment yet, unlike everything else | Accurate |
+| Binding | `0.0.0.0` (all interfaces) — confirmed via its own startup banner, contradicting two internal comments that claim loopback-only. Don't deploy this file in any environment where the host is network-reachable. | `127.0.0.1` only |
 
 Worth knowing even though it no longer changes which one is "safe to
 run": the Python build's `subprocess.run(..., cwd=working_dir,
@@ -248,8 +249,18 @@ from commit messages or trusted from either subagent's own report):
 | 17 | MCP wire-protocol fuzzing | No issues found |
 
 **Net effect: of the findings that represented real bugs (not design
-choices or already-secure behavior), only #8 (low-medium, `file_transfer`
-read-side cap) and #15 (usability, fails closed) remain open.** Finding
+choices or already-secure behavior), #8 (low-medium, `file_transfer`
+read-side cap), #15 (usability, fails closed), and the two new findings
+below remain open.**
+
+Two additional findings from a systematic sweep of `organiser-agent.py`
+(security-qa commit `811b74e`, not yet merged to `main` as of this
+writing):
+
+| # | Finding | Status |
+|---|---|---|
+| 24 | `organiser-agent.py`'s `/preview` opens files with `errors="replace"`, so a binary file returns HTTP 200 with silently corrupted content (U+FFFD replacement characters) instead of a clean error. The `file_transfer` tool is unaffected (it uses `/read_file_b64`), but `pc_read_file_preview` on a Python-build agent will silently corrupt binary output. | Open |
+| 25 | `organiser-agent.py` binds `0.0.0.0` (all interfaces), directly contradicting two of its own comments that claim loopback-only binding. Its startup banner also instructs users to expose it via ngrok to the public internet — the opposite of the tailscale-tunnel-only model documented here. Mitigated in practice by `ARCHITECTURE.md`/`BUILD_AND_SETUP.md` explicitly saying "don't deploy this file," but the file itself is misleading. | Open (mitigated by docs) | Finding
 3 is a deliberate, documented design choice, not an oversight. Finding 2
 is architecturally addressed but formally unverified for lack of a
 Windows test target — the one genuine gap in this project's testing

@@ -26,6 +26,12 @@ groups, plus a browser admin dashboard. Always pick the most specific tool.
 > `PLEX_TOKEN`, and the Plex diagnostics/service checks) — it's not coming
 > back. If you see a Plex reference anywhere outside this note, it's stale.
 
+> `file_transfer` is fully binary-safe across **all four endpoint kinds**
+> (sandbox, server, pc, codespace) as of `agent/pc-agent`'s merge. The
+> `pc:` leg now uses `/read_file_b64` / `content_b64` instead of the old
+> text-only `/preview` / `/write_file`. The 15 MB cap applies equally to
+> all legs. Any "text-only" language elsewhere in this file is stale.
+
 ---
 
 ## Architecture
@@ -88,7 +94,7 @@ single-PC setup, or pass a name (see `pc_list_configured`) for a specific machin
 For moving a file to/from a PC and anywhere else (sandbox, server,
 codespace), use `file_transfer` (Group 4) instead of a dedicated
 `pc_*` tool — see its own section for the address format and its
-current PC-side text-only limitation.
+`file_transfer` now handles binary safely on the `pc:` leg too.
 
 **PC paths always use Windows format:** `C:\Users\Sepiso Toni\Downloads\`
 
@@ -243,14 +249,10 @@ file_transfer("codespace:my-space:/workspace/out.zip", "sandbox:/tmp/out.zip")
 file_transfer("sandbox:/tmp/build.tar", "codespace:my-space@tertiary:/workspace/build.tar")
 ```
 
-**Known limitation:** the `pc:` leg still goes through organiser-agent's
-`/preview` and `/write_file` endpoints, which are **text-only** today. A
-binary file (image, zip, .exe) with a PC as either source or destination
-fails with a clear error rather than corrupting — it just can't complete
-yet. Every other pair (sandbox, server, codespace, in any combination) is
-fully binary-safe. See `coordination/tasks/pc-agent.md` for the
-base64-safe PC endpoint pair that will lift this restriction once it
-lands.
+**Binary-safe across all legs**, including `pc:`. The `pc:` leg uses
+`/read_file_b64` (GET) and `content_b64` on `/write_file` (POST) on
+`organiser-agent`. All four kinds (sandbox, server, pc, codespace) are
+fully binary-safe. The 15 MB cap applies equally to all legs.
 
 **Sandbox paths:** `/home/claude/` (Linux format)
 **PC paths:** `C:\Users\Sepiso Toni\...` (Windows format)
@@ -362,7 +364,7 @@ server_run_command("nohup python3 /home/sepisotoni/script.py > /tmp/out.log 2>&1
 | `/mcp` returns 503 "misconfigured" | `MCP_SERVER_PASSWORD` unset on a public deployment | Set it — the server fails closed rather than serving unauthenticated on the public internet |
 | GitHub 401/403 | Token expired or wrong scope | Auto-fallback tries secondary/tertiary; `check_account_status` shows which; otherwise refresh PAT |
 | `file_transfer` "Write failed... over the ... byte limit" | File larger than 15 MB | Use a location-specific tool instead (e.g. `server_write_file` for smaller pieces, or split the transfer) |
-| `file_transfer` fails with a PC as either end and a binary file | organiser-agent's file API is text-only today | Not fixable from the Claude side yet — see Group 4's known limitation |
+| `file_transfer` fails with a PC as either end and a binary file | Should not happen — `organiser-agent` now has binary-safe endpoints. If you see this, the PC's agent may be out of date (needs v2.1.0-cpp or v1.2.0-py). |
 | Admin dashboard "not configured" on Render panel | `RENDER_API_KEY`/`RENDER_SERVICE_ID` not set | Add `RENDER_API_KEY`; `RENDER_SERVICE_ID` defaults to this service already |
 
 ---
@@ -419,12 +421,13 @@ describe an outdated ngrok-based deployment model. Build and run
 | GET | `/list?folder=&recursive=` | List files in a directory |
 | POST | `/move` | Move/rename a file (cross-drive fallback included) |
 | POST | `/delete` | Delete (Recycle Bin or permanent) |
-| GET | `/preview?path=&max_bytes=` | Read first N bytes of a file (text-only today — see `file_transfer`'s known limitation) |
+| GET | `/preview?path=&max_bytes=` | Read first N bytes of a file (text mode; for binary use `/read_file_b64`) |
 | GET | `/disk_usage?folder=` | Disk usage breakdown |
 | POST | `/run_command` | Execute shell command |
 | GET | `/duplicates?folder=` | Find duplicate files by content hash |
-| POST | `/screenshot` | Capture screen → base64 image |
-| POST | `/write_file` | Write content to a file (text-only today) |
+| GET | `/read_file_b64?path=&max_bytes=` | Read a file as base64 — binary-safe; what `file_transfer`'s `pc:` leg uses internally |
+| POST | `/screenshot` | Capture screen → base64 BMP image (note: the agent returns BMP despite the internal function name `screenshot_png`; `server.py` currently mislabels it as `image/png` and truncates the data — `pc__screenshot` is not fully functional today) |
+| POST | `/write_file` | Write content to a file (`content` for text, `content_b64` for base64-encoded binary) |
 
 Auth: `X-Organiser-Secret` header (must match that PC's entry in `PCS`;
 nothing enforces this pairing beyond you setting both sides to the same
