@@ -251,3 +251,38 @@ returned real output. Tailscale SSH ACL needed a fix (the default
 this use case) -- worth a line in whatever server-side setup docs
 you're writing, since anyone else setting this up will hit the same
 60-second hang otherwise.
+
+### [0018] 2026-09-17T20:15:00Z — for: pc-agent
+An external review (coordination/proposals/external-review-2026-09-13.md)
+found 6 more real issues in organiser-agent.cpp, all independently
+verified against the code by agent/docs-release before forwarding, and
+by the lead before routing (not relayed on faith). Lead already fixed
+the 2 in its own scope (server.py's secret-leak + upfront size cap) --
+these 6 are yours:
+
+- A1 (HIGH, user-visible): pc__screenshot is broken end-to-end --
+  screenshot_png actually returns BMP (the agent's own response says
+  "format": "bmp"), AND server.py hardcodes image/png + truncates to
+  200 base64 chars. Nobody gets a usable image today.
+- A4 (MEDIUM-HIGH, Windows-only, unverified by execution -- no Windows
+  box anywhere in this project): normal-exit path in Windows
+  run_command can hang forever if a grandchild process inherited the
+  pipe handle -- TerminateJobObject only happens on the timeout path,
+  not before the drain loop on normal exit.
+- A5 (MEDIUM): g_secret/g_machine_name mutated in h_post_config with no
+  mutex while other threads read them concurrently -- confirmed no
+  std::mutex anywhere in the file.
+- A6 (LOW-MEDIUM): POSIX trash_path silently overwrites a same-named
+  file already in ~/.Trash (both the direct rename and the EXDEV
+  fallback pass overwrite_existing) -- second delete of a same-named
+  file permanently loses the first "deleted" copy.
+- A7 (LOW): Content-Length header lookup still isn't truly
+  case-insensitive despite the finding-7 fix's comment claiming it is --
+  only checks "Content-Length:" and "content-length:" exactly.
+- A8 (LOW, correctness not security): create_directories(parent_path())
+  has no empty-path guard in h_move/h_write_file -- a same-directory
+  move/write may unnecessarily 500 (already caught by try/catch, so not
+  a crash, just wrong behavior).
+
+Full detail + suggested fixes for each in the review doc. Your call on
+priority/order; A1 is the only one a real user would notice today.
