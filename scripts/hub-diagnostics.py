@@ -181,19 +181,44 @@ def check_tailscale(run=_run) -> dict:
     return check_result("Tailscale", FAIL, f"BackendState: {backend_state}")
 
 
-def check_ssh_reachable(name: str, pc_ip: str, ssh_user: str, run=_run) -> dict:
+def check_ssh_reachable(name: str, pc_ip: str, ssh_user: str, run=_run,
+                         known_hosts_dir: Path = Path("/etc/pc-tunnel/known_hosts.d")) -> dict:
     if not pc_ip:
         return check_result(f"SSH to {name}", NOT_CONFIGURED, "no PC_IP in conf file")
     if not shutil.which("ssh"):
         return check_result(f"SSH to {name}", SKIPPED, "ssh not on PATH")
+
+    # Use the SAME host-key verification the real tunnel uses (see
+    # pc-tunnel@.service's setup step 4 / SECURITY_FINDINGS.md finding 6:
+    # StrictHostKeyChecking=yes against a per-PC pinned known_hosts file,
+    # populated once via ssh-keyscan) rather than a looser accept-new
+    # check -- that way this diagnostic can actually catch "the pinned
+    # key doesn't match anymore" (a real MITM, or the PC's SSH host keys
+    # were regenerated and nobody re-pinned them), which is exactly the
+    # kind of failure a "just check the port is reachable" test would
+    # silently miss. Falls back to accept-new only if the PC hasn't been
+    # through the pinning step yet (e.g. mid-setup) -- that's a real,
+    # different state worth distinguishing, not something to paper over.
+    known_hosts_file = known_hosts_dir / name
+    if known_hosts_file.exists():
+        host_key_opts = ["-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts_file}"]
+        pinned = True
+    else:
+        host_key_opts = ["-o", "StrictHostKeyChecking=accept-new"]
+        pinned = False
+
     r = run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new",
+        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", *host_key_opts,
          f"{ssh_user}@{pc_ip}", "true"],
         timeout=8,
     )
     if r.returncode == 0:
-        return check_result(f"SSH to {name}", PASS, f"{ssh_user}@{pc_ip} reachable, key auth working")
-    return check_result(f"SSH to {name}", FAIL, (r.stderr or "ssh failed").strip()[:200])
+        note = "key verified against pinned known_hosts" if pinned else "NOT pinned yet (see pc-tunnel@.service setup step 4)"
+        return check_result(f"SSH to {name}", PASS, f"{ssh_user}@{pc_ip} reachable, key auth working ({note})")
+    detail = (r.stderr or "ssh failed").strip()[:200]
+    if pinned and ("REMOTE HOST IDENTIFICATION HAS CHANGED" in detail or "Host key verification failed" in detail):
+        detail = f"HOST KEY MISMATCH against pinned known_hosts -- {detail}"
+    return check_result(f"SSH to {name}", FAIL, detail)
 
 
 def check_disk_space(path="/", warn_pct=90) -> dict:

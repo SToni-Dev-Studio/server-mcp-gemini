@@ -34,11 +34,16 @@ hd = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(hd)
 
 
-def fake_run(returncode=0, stdout="", stderr=""):
+def fake_run(returncode=0, stdout="", stderr="", captured_cmds=None):
     """Returns a `run(cmd, timeout=...)` callable that ignores its
     arguments and always returns a fixed CompletedProcess -- stands in for
-    hub-diagnostics.py's `_run` in tests."""
+    hub-diagnostics.py's `_run` in tests. If captured_cmds (a list) is
+    passed, every cmd this is called with is appended to it, so a test
+    can assert on the EXACT command built (e.g. which ssh flags were
+    chosen), not just the final PASS/FAIL classification."""
     def _f(cmd, timeout=5):
+        if captured_cmds is not None:
+            captured_cmds.append(cmd)
         return subprocess.CompletedProcess(cmd, returncode=returncode, stdout=stdout, stderr=stderr)
     return _f
 
@@ -232,6 +237,74 @@ def test_ssh_reachable_fail():
 def test_ssh_reachable_not_configured_without_ip():
     result = hd.check_ssh_reachable("desktop", "", "alice")
     assert result["status"] == hd.NOT_CONFIGURED
+
+
+def test_ssh_reachable_uses_accept_new_when_no_pinned_known_hosts(tmp_path):
+    """When a PC hasn't been through the pinning step yet (see
+    pc-tunnel@.service setup step 4), the check should fall back to
+    accept-new rather than requiring a pin that doesn't exist -- and
+    should say so plainly in the detail on success, since 'reachable but
+    unpinned' is a meaningfully different, worth-knowing state from
+    'reachable and verified against a pinned key'."""
+    captured = []
+    result = hd.check_ssh_reachable(
+        "desktop", "192.168.1.50", "alice",
+        run=fake_run(returncode=0, captured_cmds=captured),
+        known_hosts_dir=tmp_path / "known_hosts.d",  # deliberately doesn't exist
+    )
+    assert result["status"] == hd.PASS
+    assert "NOT pinned yet" in result["detail"]
+    cmd = captured[0]
+    assert "accept-new" in " ".join(cmd)
+    assert "UserKnownHostsFile" not in " ".join(cmd)
+
+
+def test_ssh_reachable_uses_pinned_known_hosts_when_available(tmp_path):
+    """The real tunnel (pc-tunnel@.service) uses StrictHostKeyChecking=yes
+    against a per-PC pinned known_hosts file -- this check should use the
+    exact same verification, not a looser one, so it can actually catch
+    a real problem (see the mismatch test below) rather than just
+    confirming the port is open."""
+    known_hosts_dir = tmp_path / "known_hosts.d"
+    known_hosts_dir.mkdir()
+    pinned_file = known_hosts_dir / "desktop"
+    pinned_file.write_text("192.168.1.50 ssh-ed25519 AAAA...\n")
+
+    captured = []
+    result = hd.check_ssh_reachable(
+        "desktop", "192.168.1.50", "alice",
+        run=fake_run(returncode=0, captured_cmds=captured),
+        known_hosts_dir=known_hosts_dir,
+    )
+    assert result["status"] == hd.PASS
+    assert "verified against pinned known_hosts" in result["detail"]
+    cmd = " ".join(captured[0])
+    assert "StrictHostKeyChecking=yes" in cmd
+    assert f"UserKnownHostsFile={pinned_file}" in cmd
+    assert "accept-new" not in cmd
+
+
+def test_ssh_reachable_flags_host_key_mismatch_distinctly(tmp_path):
+    """A pinned host key that no longer matches (MITM, or the PC's SSH
+    host keys were regenerated and nobody re-pinned them) is a much more
+    alarming failure than 'connection timed out' -- this should be
+    surfaced distinctly, not buried in generic ssh stderr text."""
+    known_hosts_dir = tmp_path / "known_hosts.d"
+    known_hosts_dir.mkdir()
+    (known_hosts_dir / "desktop").write_text("192.168.1.50 ssh-ed25519 AAAA...\n")
+
+    result = hd.check_ssh_reachable(
+        "desktop", "192.168.1.50", "alice",
+        run=fake_run(
+            returncode=255,
+            stderr="@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
+                   "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
+                   "Host key verification failed.\n",
+        ),
+        known_hosts_dir=known_hosts_dir,
+    )
+    assert result["status"] == hd.FAIL
+    assert "HOST KEY MISMATCH" in result["detail"]
 
 
 # ---------------------------------------------------------------------------
