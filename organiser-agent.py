@@ -638,6 +638,19 @@ def get_config():
 
 @app.post("/config")
 def update_config():
+    # SECURITY_FINDINGS.md finding 20 (HIGH), confirmed independently
+    # against this Flask implementation too: /config previously let an
+    # unauthenticated caller set the FIRST secret whenever none was
+    # configured yet -- turning the transient "no secret = open" window
+    # (finding 3, an accepted trade-off for one-off operations) into a
+    # PERMANENT takeover, since the attacker-chosen secret then persists
+    # to disk and locks the legitimate owner out on every future start.
+    # Fix (the simplest of security-qa's suggested directions): /config
+    # can ROTATE an existing secret (already safely gated -- reaching
+    # this handler at all requires the current secret once one is set,
+    # via _check_auth() above), but can never BOOTSTRAP the first one
+    # over the network. The first secret must come from ORGANISER_SECRET
+    # (env var) or a local edit of the config file.
     global MACHINE_NAME, SECRET
     _check_auth()
     body = request.get_json(force=True) or {}
@@ -650,9 +663,24 @@ def update_config():
         updates["machine_name"] = name
 
     if "secret" in body:
+        new_secret = str(body["secret"])
+        if not SECRET and new_secret:
+            return jsonify({
+                "error": (
+                    "Cannot set the initial secret via /config over the network -- "
+                    "this would let anyone who reaches this port before you do "
+                    "permanently lock you out (SECURITY_FINDINGS.md finding 20). "
+                    f"Set ORGANISER_SECRET as an environment variable (then restart), "
+                    f"or edit {_MACHINE_CONFIG_PATH} directly on this machine. "
+                    "Once a secret exists, /config can rotate it normally."
+                )
+            }), 403
         # Empty string is allowed here — it means "remove the secret",
         # matching the existing semantics of ORGANISER_SECRET unset.
-        updates["secret"] = str(body["secret"])
+        # (This guard only blocks empty->non-empty; non-empty->empty and
+        # non-empty->non-empty rotation both still work, appropriately
+        # gated by already needing the current secret to be here.)
+        updates["secret"] = new_secret
 
     if not updates:
         return jsonify({"error": "Nothing to update. Send machine_name and/or secret."}), 400
@@ -697,6 +725,7 @@ button { margin-top: 16px; padding: 8px 16px; }
 <hr>
 <label>Machine name <input id="machineName" type="text"></label>
 <label>New secret (leave blank to remove) <input id="newSecret" type="password"></label>
+<p style="font-size:0.8em;color:#666">If no secret is configured yet, it can't be set from this page over the network (security fix) — set ORGANISER_SECRET as an environment variable first, or edit the config file directly on this machine, then use this page to rotate it afterward.</p>
 <button onclick="loadConfig()">Refresh current config</button>
 <button onclick="saveConfig()">Save</button>
 <div id="status"></div>

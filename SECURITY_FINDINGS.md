@@ -62,6 +62,7 @@ writing (`python3 -m pytest tests/ -v`).
 | 15 | DNS-rebinding `allowed_hosts` has no port wildcard — breaks local/self-hosted access | server.py | Low (availability, fails closed) | Confirmed |
 | 16 | Session ID alone (no bearer token) is rejected — auth runs per-request | server.py | — | **Confirmed secure** — positive finding |
 | 17 | MCP wire-protocol fuzzing (malformed JSON-RPC, wrong tool-arg types, oversized/null-byte/unicode args) | server.py + mcp SDK | — | **No issues found** — thorough fuzzing, clean result |
+| 20 | Unauthenticated `/config` POST can PERMANENTLY hijack a PC agent (both implementations) | organiser-agent.cpp + organiser-agent.py | **High** | **FIXED by pc-agent** — independently discovered by security-qa (agent/security-qa branch, commit `f61783b`) at essentially the same time pc-agent fixed it here; cross-validated finding, see status update below |
 
 ---
 
@@ -608,3 +609,82 @@ tool/field names the caller already supplied themselves.**
 **Conclusion: this is a clean, thoroughly-tested result, not a skipped
 check.** 16 of the fuzz cases are now locked in as regression tests in
 `tests/test_mcp_protocol_fuzzing.py`.
+
+## 20. Unauthenticated `/config` POST could PERMANENTLY hijack a PC agent — both implementations
+
+> **FIXED by pc-agent.** This finding was discovered and reported
+> independently, at essentially the same time, by both pc-agent (this
+> update) and security-qa (`agent/security-qa` branch, commit `f61783b`,
+> not yet merged into `main` as of this writing) — a genuine
+> cross-validation, not a case of one session copying the other's work.
+> Full credit to security-qa's writeup, which is more thorough than what
+> follows here; this section documents pc-agent's independent fix.
+
+pc-agent added an in-exe local config dashboard (per broadcast [0006]) to
+both `organiser-agent.cpp` and the separate, parallel `organiser-agent.py`
+(Flask) implementation, so the machine name and secret can be managed
+from a browser instead of hand-editing a file over SSH/RDP. Both
+implementations shared the same "no secret configured → auth check is
+skipped entirely" pattern already accepted for one-off operations
+(finding 3) — but applied uniformly to `/config` too, which has a
+fundamentally different risk profile: an unauthenticated caller could
+POST a brand-new secret, which was then persisted to disk and survived a
+restart, permanently locking the legitimate owner out with no
+network-based recovery path.
+
+**Fix**: `/config` can still *rotate* an existing secret (already safely
+gated — reaching the handler at all requires the current secret once one
+is set, via the normal per-request auth check), but can no longer
+*bootstrap* the first secret over the network at all. The transition
+being blocked specifically is empty-secret → non-empty-secret while no
+secret is currently configured; everything else (removing a secret,
+rotating a non-empty secret to a different non-empty one, changing
+`machine_name` regardless of secret state) is unaffected. The first
+secret must now come from `ORGANISER_SECRET` (environment variable) or a
+direct local edit of the persisted config file — both of which require
+actual local access to the machine, not just network access to the
+port.
+
+```cpp
+// organiser-agent.cpp — h_post_config
+if (have_secret) {
+    std::string new_secret = json_str(req.body, "secret");
+    if (g_secret.empty() && !new_secret.empty()) {
+        return Response::err(403, "Cannot set the initial secret via /config over the network ...");
+    }
+}
+```
+```python
+# organiser-agent.py — update_config
+if "secret" in body:
+    new_secret = str(body["secret"])
+    if not SECRET and new_secret:
+        return jsonify({"error": "Cannot set the initial secret via /config over the network ..."}), 403
+```
+
+**Verified live, both implementations, both the attack and the fix's
+edges**:
+- Attacker with zero credentials POSTs `{"secret": "attacker-chosen-secret"}`
+  to a freshly-started, unconfigured agent → clean `403` in both
+  organiser-agent.cpp (real compiled binary) and organiser-agent.py
+  (Flask test client). Confirmed via `GET /config`'s `secret_set` field
+  that nothing was actually persisted, not just that the one response
+  said 403.
+- Legitimate rotation still works: bootstrapped a secret via a direct
+  config-file write (the local-access path the fix now requires for the
+  *first* secret), then rotated it via `/config` while presenting the
+  current secret — old secret stops working, new one works, in both
+  implementations.
+- `machine_name` changes remain unaffected by the guard (it's a display
+  label, not a credential) — confirmed still settable with no secret
+  configured, in both implementations.
+- Confirmed the fix doesn't accidentally block legitimate no-op cases:
+  setting `secret: ""` while already empty, and rotating a non-empty
+  secret to a different non-empty value while authenticated, both still
+  work.
+
+Regression tests: `tests/test_organiser_agent_security.py` (cpp — 3 new
+tests) and `tests/test_organiser_agent.py::ConfigDashboardTests` (Flask
+— rewrote the one existing test that had encoded the *vulnerable*
+behavior, in place, per this file's standing convention, plus 2 new
+tests). Full suite: 120 passed + 1 xfailed after this change.

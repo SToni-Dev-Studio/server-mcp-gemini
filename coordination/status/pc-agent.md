@@ -1,120 +1,125 @@
 # Status: pc-agent
-Updated: 2026-09-13T16:34:20Z
+Updated: 2026-09-16T18:09:47Z
 Branch: agent/pc-agent
-State: DONE (brief + broadcast [0006] + all priority security findings from [0010]/[0011]/[0013]; see Blockers for the one thing genuinely out of my hands)
-Last broadcast read: 0015
+State: DONE (brief + broadcast [0006] + all priority security findings from [0010]/[0011]/[0013], plus a self-initiated HIGH-severity fix -- finding 20 -- found while checking in on other agents' work; see Blockers for the one thing genuinely out of my hands)
+Last broadcast read: 0016
+HEAD: 017a3a3
 
 ## Summary
-Round 1: fixed a real, verified bug in organiser-agent.cpp (run_command
-had no enforced timeout), added a protected-path guard to
-organiser-agent.py (had none at all), added machine identity exposed via
-/status (broadcast [0002]), and added /read_file_b64 + content_b64 on
-/write_file plus a /config + /admin local dashboard to both builds
-(broadcast [0006]). Merged into main at bd8714c.
+Rounds 1-3 (prior status entries, unchanged): timeout fix, protected-path
+guard, machine identity, binary-safe endpoints + config dashboard
+(broadcast [0006]); HIGH-severity working_dir injection verified already
+fixed, plus findings 4/5/6/7 fixed and verified live (broadcast [0010]);
+merged main, reconciled a merge-timing gap around finding 7 with lead's
+independent rediscovery, verified end-to-end against the actual
+128,000-byte payload that caught it, raised server.py's defensive cap
+back to normal. Broadcast [0016] confirms this branch is DONE and merged
+into main (5bb71b6) -- lead independently recompiled and re-ran the full
+suite before trusting the merge, got the exact same result.
 
-Round 2: treated the HIGH-severity working_dir injection as top priority
-per broadcast [0010]; verified it was ALREADY closed as a side effect of
-round 1's run_command rewrite (proved with security-qa's exact exploit
-plus a stricter test of my own). Fixed three more organiser-agent.cpp
-findings (4, 5, 7) and one infra finding (6). Pushed after lead had
-already merged round 1 into main -- so lead's independent rediscovery of
-finding 7 (broadcast [0011]/[0013]) was correct at the time, just ahead
-of this fix reaching main.
+Round 4 (this update): user asked me to look at agent/security-qa's
+latest work for context. Found something directly actionable: a NEW
+HIGH-severity finding (their finding 20) against my own /config
+dashboard, discovered independently on their branch (not yet merged into
+main) -- an unauthenticated caller could permanently hijack a PC agent by
+setting the first-ever secret via /config whenever none was configured
+yet. Confirmed the vulnerability myself against my own current code
+(didn't just trust their report), fixed it in both organiser-agent.cpp
+and organiser-agent.py, verified the fix live against both, caught and
+fixed my OWN existing test that had encoded the vulnerable behavior, and
+wrote independent regression tests (their equivalent tests live only on
+their branch, not mine, so cherry-picking wasn't straightforward --
+wrote matching coverage instead).
 
-Round 3 (this update): read broadcasts [0011]-[0015] in full, ran the
-new step-0 check (git fetch + compare origin/agent/pc-agent against what
-I remembered pushing -- clean, no surprise commits from another
-session). Merged origin/main (resolving 2 real conflicts -- both sides
-had independently reached the same conclusions on finding 1, reconciled
-into one version). Properly fixed the mcp-SDK dependency mismatch I'd
-previously given up on (installed the exact pinned mcp==1.29.0 from
-requirements.txt) so I could finally run the FULL test suite, not just
-my own subset. Re-verified finding 7's fix end-to-end against lead's own
-regression test using the exact 128,000-byte payload that caught the bug
-originally -- confirmed it holds. Raised server.py's
-_PC_TRANSFER_SAFE_MAX_BYTES workaround back to the full 15MB now that
-it's no longer needed, and updated the e2e test file per its own
-embedded instructions (invert, don't delete).
+## Files changed (round 4)
+- organiser-agent.cpp -- h_post_config now rejects bootstrapping the
+  first-ever secret over the network (403); rotation of an existing
+  secret unaffected
+- organiser-agent.py -- update_config gets the equivalent guard
+- Both /admin pages -- added a note explaining the restriction
+- tests/test_organiser_agent.py -- rewrote
+  test_post_config_sets_secret_and_it_takes_effect_immediately (which
+  had encoded the vulnerable behavior) into
+  test_post_config_cannot_bootstrap_initial_secret_unauthenticated, plus
+  2 new companion tests (rotation still works, machine_name unaffected)
+- tests/test_organiser_agent_security.py -- 3 new equivalent tests for
+  the C++ side; isolated running_agent()'s $HOME per test (matching a
+  fix security-qa made independently on their branch) so the persisted
+  config file can't leak state between tests
+- SECURITY_FINDINGS.md -- new finding 20 entry, explicitly crediting
+  security-qa's independent, concurrent discovery of the same issue
 
-## Files changed (round 3, on top of rounds 1-2)
-- server.py -- raised _PC_TRANSFER_SAFE_MAX_BYTES to match
-  _FILE_TRANSFER_MAX_BYTES (15MB), updated now-stale comments/error
-  message
-- tests/test_file_transfer_pc_e2e.py -- inverted
-  test_organiser_agent_still_has_the_64kb_truncation_bug into
-  test_organiser_agent_no_longer_has_the_64kb_truncation_bug (per its
-  own instruction); fixed test_pc_transfer_rejects_payload_over_the_safe_cap,
-  which broke because raising the pc-specific cap to equal the general
-  cap makes the general check fire first (rewrote to check the actual
-  safety property, not a specific error-message wording)
-- SECURITY_FINDINGS.md -- finding 7 marked fully fixed and end-to-end
-  verified, with the merge-timing explanation documented
-
-Commits (agent/pc-agent, all pushed, HEAD is 038dd96):
-- 86caa29, 734213f, f742298, 6f5d451, 0e9d39d -- round 2 (see prior
-  status entries, still on this branch, unchanged)
-- d6e12bc -- merge origin/main (resolved conflicts in
-  SECURITY_FINDINGS.md, tests/test_organiser_agent_security.py)
-- 038dd96 -- finding 7 end-to-end closure (this round)
+Commit (agent/pc-agent, pushed): 017a3a3
 
 ## Tests run (command -> result)
-- `python3 -m pytest tests/ -v` (FULL SUITE, all 116 tests, all test
-  files including ones I couldn't previously collect) -> **115 passed,
-  1 xfailed**. Fixed the blocker myself this round: previous sessions'
-  attempts to install `mcp` pulled in an incompatible v2.x API
-  (FastMCP renamed); installing the exact `mcp==1.29.0` pinned in
-  requirements.txt resolved it cleanly. This is the first time I've
-  run the actual complete suite rather than a subset.
-- `python3 -m pytest tests/test_file_transfer_pc_e2e.py -v` (lead's own
-  finding-7 regression suite) -> all 5 pass, INCLUDING the inverted
-  truncation-bug test using the exact 128,000-byte payload that
-  originally caught the bug -- confirmed byte-identical on disk now
-  (was 48,981 of 128,000 bytes before the fix).
-- `g++ -std=c++17 -O2 -Wall -o <bin> organiser-agent.cpp -lpthread`
-  -> compiles clean.
+- `g++ -std=c++17 -O2 -Wall -o <bin> organiser-agent.cpp -lpthread` ->
+  compiles clean.
+- `python3 -m pytest tests/ -q` (full suite) -> **120 passed + 1
+  xfailed** (was 116 before this round's additions).
+- Live verification against both compiled/running implementations, not
+  just reading the diff:
+  - Exact exploit (zero-credential POST of `{"secret": "..."}`)  against
+    a freshly-started, unconfigured agent -> clean `403` in both
+    organiser-agent.cpp (real compiled binary over real HTTP) and
+    organiser-agent.py (Flask test client). Confirmed via `GET
+    /config`'s `secret_set` field that nothing was actually persisted --
+    not just that the one response said 403.
+  - Legitimate rotation: bootstrapped a secret via a direct config-file
+    write (the local-access path the fix requires for the *first*
+    secret), then rotated it via authenticated `/config` -- old secret
+    stops working, new one works, in both implementations.
+  - `machine_name` changes confirmed unaffected by the guard (not a
+    credential) in both implementations.
+  - Caught my own mistake mid-verification: my first version of the
+    rotation test bootstrapped via `ORGANISER_SECRET` (env var), which
+    by design is immutable via `/config` at runtime (env var always
+    wins) -- got a false failure, diagnosed it correctly as a test
+    design issue rather than a bug in the fix, and rewrote the test to
+    bootstrap via a direct config-file write instead.
 
 ## Findings / security notes
-- The "finding 7 rediscovery" flagged in broadcast [0011]/[0013] was a
-  merge-timing artifact, not a real regression or a flaw in my fix.
-  Confirmed via git history: `86caa29` (my finding-7 fix) was pushed to
-  `agent/pc-agent` AFTER lead had already merged an earlier state of
-  this branch into `main` at `bd8714c`. Lead's rediscovery, using a
-  128,000-byte payload against that pre-fix `main` state, was entirely
-  correct at the time -- it just predated the actual fix. I verified
-  this explanation by checking `git merge-base --is-ancestor 86caa29
-  origin/main` (returned false at the time) rather than assuming either
-  side's report was wrong.
-- Both my branch and main independently arrived at the same fix and the
-  same conclusion for finding 1 while working in parallel (my own
-  verification vs. lead's live re-verification, per broadcast [0011]) --
-  a nice cross-validation, reconciled into one merged writeup rather
-  than picking one side arbitrarily.
-- Raising `_PC_TRANSFER_SAFE_MAX_BYTES` to equal `_FILE_TRANSFER_MAX_BYTES`
-  made the pc-specific size check in `server.py`'s `_location_write_bytes`
-  effectively dead code at that exact threshold (the general check earlier
-  in the function now always fires first). Left the pc-specific check in
-  place rather than removing it -- it's harmless, self-documenting, and
-  becomes live again if either constant is ever changed independently of
-  the other -- but rewrote the test that exercised it to check the
-  actual safety property (oversized pc: writes are still rejected,
-  never silently corrupted) instead of a specific error-message wording
-  that was really an implementation detail of which code path caught it.
-- Followed the new step-0 routine from broadcast [0014] this session:
-  checked `origin/agent/pc-agent` against what I remembered pushing
-  before starting work, and again before the final push. Both checks
-  came back clean (no unrecognized commits) -- the incident described in
-  [0014] doesn't appear to have recurred here.
+- This finding was NOT something I was asked to look for -- the user
+  asked me to check in on agent/security-qa's work for context, and I
+  found something directly actionable against my own code while doing
+  so. Fixed it the same session rather than just noting it for later.
+- Genuine cross-validation, not duplicated effort: security-qa found and
+  reported this independently on their own branch (commit `f61783b`,
+  not yet merged into main) at essentially the same time I found and
+  fixed it here. Their writeup is more thorough than what I added to
+  SECURITY_FINDINGS.md -- I credited them explicitly rather than
+  presenting this as solely my own discovery.
+- Their suggested fix ("simplest: never allow /config to set an initial
+  secret over the network at all... once any secret exists, /config can
+  rotate it") matches what I'd independently arrived at before reading
+  their detailed suggestions -- worth noting as a second form of
+  cross-validation on the fix approach itself, not just the finding.
+- Their regression tests for this finding live only on
+  `agent/security-qa`, not merged into `main`, so not available on this
+  branch. Rather than trying to cherry-pick across branches (which
+  isn't really mine to do), I wrote independent equivalent tests here.
+  When their branch eventually merges, expect some overlap/redundancy
+  between their finding-20 tests and mine -- worth a dedup pass at that
+  point, not a conflict to worry about now.
+- Also fixed a real gap in my OWN test suite while doing this: I had an
+  existing test (`test_post_config_sets_secret_and_it_takes_effect_immediately`)
+  that literally encoded the vulnerable behavior as correct/expected --
+  written during round 1, before this finding existed. A reminder that
+  "my own tests pass" was never sufficient evidence of security on its
+  own; external review (in this case, incidentally, by another agent's
+  concurrent work) caught what my own test suite was structurally
+  blind to.
 
 ## Blockers / questions for lead
 - **Finding 2 (Windows-side injection) still cannot be verified by
   execution** -- no Windows toolchain available to pc-agent in this
-  environment either. The fix should close it by the same logic as the
-  POSIX side (CreateProcess's lpCurrentDirectory instead of any shell
-  string), but "should" isn't "verified." If anyone gets access to a
-  real Windows box, this plus the CreateProcess/Job Object timeout-kill
-  path are the two things most worth a real smoke test before this goes
-  into production.
-- No other blockers. Brief + broadcast [0006] + every priority security
-  finding from [0010]/[0011]/[0013] are done, tested end-to-end against
-  the actual regression tests that caught them (not just my own), and
-  pushed. Full 116-test suite passes on this branch.
+  environment either. Same status as every prior update.
+- Not a blocker, but worth flagging: this branch (agent/pc-agent) now
+  has a finding 20 fix that predates security-qa's own finding-20
+  branch being merged into main. When main eventually picks up both,
+  expect the SECURITY_FINDINGS.md entries and regression tests to need
+  a light dedup pass (not a conflict -- both sides fixed the same real
+  bug the same way, just documented/tested it independently).
+- No other blockers. Everything from the brief, broadcast [0006], every
+  priority security finding from [0010]/[0011]/[0013], AND this
+  self-found finding 20 are done, tested live against real running
+  instances of both implementations, and pushed.

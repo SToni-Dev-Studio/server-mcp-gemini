@@ -13,6 +13,7 @@ status file.
 """
 import importlib
 import importlib.util
+import json
 import os
 import platform
 import sys
@@ -304,20 +305,66 @@ class ConfigDashboardTests(unittest.TestCase):
         saved = self.oa._load_config()
         self.assertEqual(saved["machine_name"], "renamed-pc")
 
-    def test_post_config_sets_secret_and_it_takes_effect_immediately(self):
-        # No secret set yet -> /status works with no header.
+    def test_post_config_cannot_bootstrap_initial_secret_unauthenticated(self):
+        """SECURITY_FINDINGS.md finding 20 (HIGH), fixed. This test
+        previously asserted the VULNERABLE behavior (an unauthenticated
+        POST /config could set the first-ever secret, persisted to disk,
+        permanently locking out the legitimate owner) -- rewritten in
+        place to confirm the fix instead, per this suite's established
+        convention of inverting rather than deleting."""
+        # No secret set yet -> /status works with no header (documented-
+        # open baseline, finding 3).
         r1 = self.client.get("/status")
         self.assertEqual(r1.status_code, 200)
 
-        r2 = self.client.post("/config", json={"secret": "hunter2"})
+        # Attacker, holding zero credentials, tries to set the first secret.
+        r2 = self.client.post("/config", json={"secret": "attacker-secret"})
+        self.assertEqual(r2.status_code, 403, "must not be able to bootstrap the first secret unauthenticated")
+
+        # Confirm nothing was actually persisted.
+        r3 = self.client.get("/config")
+        self.assertFalse(r3.get_json()["secret_set"])
+
+        # Owner retains their (always-open, pre-existing) access.
+        r4 = self.client.get("/status")
+        self.assertEqual(r4.status_code, 200)
+
+    def test_secret_rotation_works_once_a_secret_already_exists(self):
+        """Companion to the fix above: once a secret exists, /config can
+        rotate it normally, gated by already knowing the current secret.
+
+        Bootstraps via a direct config-file write (one of the two paths
+        the finding-20 fix still allows), not ORGANISER_SECRET -- an
+        env-var-sourced secret is intentionally immutable via /config at
+        runtime (env var always wins by design), so using it here would
+        test that immutability instead of rotation."""
+        config_dir = self._tmp_xdg + "/organiser-agent"
+        os.makedirs(config_dir, exist_ok=True)
+        with open(config_dir + "/machine.json", "w") as f:
+            json.dump({"machine_id": "test-rotation", "secret": "file-bootstrapped-secret"}, f)
+        oa = _reload_agent()
+        client = oa.app.test_client()
+
+        r1 = client.get("/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        self.assertEqual(r1.status_code, 200)
+
+        r2 = client.post("/config", json={"secret": "rotated-secret"},
+                          headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
         self.assertEqual(r2.status_code, 200)
 
-        # Hot-reloaded: an unauthenticated request now fails...
-        r3 = self.client.get("/status")
-        self.assertEqual(r3.status_code, 401)
-        # ...and the correct secret succeeds, without restarting the process.
-        r4 = self.client.get("/status", headers={"X-Organiser-Secret": "hunter2"})
-        self.assertEqual(r4.status_code, 200)
+        r3 = client.get("/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        self.assertEqual(r3.status_code, 401, "old secret should no longer work after rotation")
+
+        r4 = client.get("/status", headers={"X-Organiser-Secret": "rotated-secret"})
+        self.assertEqual(r4.status_code, 200, "new secret should work after rotation")
+
+    def test_machine_name_change_unaffected_by_secret_bootstrap_guard(self):
+        """The finding-20 fix must be scoped precisely to the secret
+        field -- machine_name is a display label, not a credential, and
+        must remain settable with no secret configured."""
+        resp = self.client.post("/config", json={"machine_name": "my-desktop"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.get_json()["machine_name"], "my-desktop")
 
     def test_env_var_secret_takes_precedence_over_config_file_secret(self):
         os.environ["ORGANISER_SECRET"] = "env-secret"

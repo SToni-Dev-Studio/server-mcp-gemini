@@ -1183,6 +1183,33 @@ static Response h_post_config(const Request& req) {
         return Response::err(400, "Nothing to update. Send machine_name and/or secret.");
     }
 
+    // SECURITY_FINDINGS.md finding 20 (HIGH): /config previously let an
+    // unauthenticated caller set the FIRST secret whenever none was
+    // configured yet -- turning the transient "no secret = open" window
+    // (finding 3, an accepted trade-off for one-off operations) into a
+    // PERMANENT takeover, since the attacker-chosen secret then persists
+    // to disk and locks the legitimate owner out on every future start.
+    // Fix (the simplest of security-qa's suggested directions): /config
+    // can ROTATE an existing secret (already safely gated -- reaching
+    // this handler at all requires knowing the current secret once one
+    // is set, via the normal auth check in handle_conn), but can never
+    // BOOTSTRAP the first one over the network. The first secret must
+    // come from ORGANISER_SECRET (env var) or a local edit of the
+    // config file -- a step that requires actual local access, not just
+    // network access to this port.
+    if (have_secret) {
+        std::string new_secret = json_str(req.body, "secret");
+        if (g_secret.empty() && !new_secret.empty()) {
+            return Response::err(403,
+                "Cannot set the initial secret via /config over the network -- "
+                "this would let anyone who reaches this port before you do "
+                "permanently lock you out (SECURITY_FINDINGS.md finding 20). "
+                "Set ORGANISER_SECRET as an environment variable (then restart), "
+                "or edit " + g_machine_config_path.string() + " directly on this "
+                "machine. Once a secret exists, /config can rotate it normally.");
+        }
+    }
+
     if (have_name) {
         std::string name = json_str(req.body, "machine_name");
         // trim
@@ -1197,7 +1224,10 @@ static Response h_post_config(const Request& req) {
 
     if (have_secret) {
         // Empty string is allowed — removes the secret, matching
-        // ORGANISER_SECRET-unset semantics.
+        // ORGANISER_SECRET-unset semantics. (The bootstrap guard above
+        // only blocks empty->non-empty; non-empty->empty and
+        // non-empty->non-empty rotation both still work, appropriately
+        // gated by already needing the current secret to be here.)
         std::string secret = json_str(req.body, "secret");
         g_config_saved_secret = secret;
         const char* secret_env = getenv("ORGANISER_SECRET");
@@ -1229,6 +1259,7 @@ static Response h_admin_page(const Request&) {
 "<hr>"
 "<label>Machine name<input id=\"machineName\" type=\"text\"></label>"
 "<label>New secret (leave blank to remove)<input id=\"newSecret\" type=\"password\"></label>"
+"<p style=\"font-size:0.8em;color:#666\">If no secret is configured yet, it can't be set from this page over the network (security fix) - set ORGANISER_SECRET as an environment variable first, or edit the config file directly on this machine, then use this page to rotate it afterward.</p>"
 "<button onclick=\"loadConfig()\">Refresh current config</button>"
 "<button onclick=\"saveConfig()\">Save</button>"
 "<div id=\"status\"></div>"

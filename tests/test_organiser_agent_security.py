@@ -10,19 +10,32 @@ the test, on 127.0.0.1, torn down at the end of each test.
 Skips cleanly (does not fail) if g++ isn't available in the environment.
 
 Findings this file locks in as regressions (see SECURITY_FINDINGS.md for
-full writeup, severity, and remediation suggestions):
+full writeup, severity, and remediation suggestions) -- all FIXED as of
+this branch, tests inverted to confirm the fixes hold rather than
+deleted (per this file's own established convention):
   - working_dir command injection (single-quote breakout on the Linux
-    /bin/bash -c wrapping) -- CONFIRMED exploitable.
-  - No-secret-configured means the auth check is skipped entirely.
-  - /preview's max_bytes is attacker-controlled with no upper bound and
-    is used to pre-allocate a buffer before checking the real file size.
-  - Secret comparison is not constant-time (plain std::string !=).
+    /bin/bash -c wrapping) -- FIXED (run_command rewrite, no longer
+    builds a shell string from working_dir at all).
+  - No-secret-configured means most auth checks are skipped entirely --
+    left as documented, accepted behavior for one-off operations
+    (finding 3), but /config specifically can no longer use that window
+    to PERMANENTLY set a secret (finding 20, see below).
+  - /preview's max_bytes is attacker-controlled -- FIXED, clamped to a
+    hard ceiling and to the real file size before allocating.
+  - Secret comparison is not constant-time -- FIXED
+    (constant_time_equal(), matching hmac.compare_digest's approach).
+  - /config could be used by an unauthenticated caller to permanently
+    hijack the agent by setting the first-ever secret -- FIXED: /config
+    can rotate an existing secret but can never bootstrap the first one
+    over the network.
 """
 import json
 import os
 import shutil
 import socket
 import subprocess
+import sys
+import tempfile
 import time
 import contextlib
 import urllib.request
@@ -59,10 +72,18 @@ def _free_port():
 
 @contextlib.contextmanager
 def running_agent(binary, secret=None, extra_env=None):
+    """organiser-agent persists machine identity/secret to a fixed,
+    per-OS-user path ($HOME/.config/organiser-agent/machine.json on
+    Linux -- see SECURITY_FINDINGS.md finding 20). Every invocation here
+    gets its own isolated $HOME so tests never leak state into each
+    other or into whatever real $HOME this sandbox happens to have."""
     port = _free_port()
+    isolated_home = tempfile.mkdtemp(prefix="organiser-agent-test-home-")
     env = os.environ.copy()
     env.pop("ORGANISER_SECRET", None)
     env["ORGANISER_PORT"] = str(port)
+    env["HOME"] = isolated_home
+    env["XDG_CONFIG_HOME"] = os.path.join(isolated_home, ".config")
     if secret is not None:
         env["ORGANISER_SECRET"] = secret
     if extra_env:
@@ -89,6 +110,7 @@ def running_agent(binary, secret=None, extra_env=None):
     finally:
         proc.kill()
         proc.wait(timeout=5)
+        shutil.rmtree(isolated_home, ignore_errors=True)
 
 
 def _get(base, path, headers=None):
@@ -247,3 +269,111 @@ def test_preview_of_binary_file_returns_invalid_utf8_over_the_wire(agent_binary,
         assert status == 200
         with pytest.raises(UnicodeDecodeError):
             body.decode("utf-8")
+
+
+def test_unauthenticated_config_post_cannot_bootstrap_the_initial_secret(agent_binary):
+    """SECURITY_FINDINGS.md finding 20 (HIGH), fixed. Originally: when no
+    ORGANISER_SECRET was configured, POST /config let ANY unauthenticated
+    caller set a brand-new secret -- persisted to disk, surviving a
+    restart, permanently locking out the legitimate owner with no
+    network recovery path. A meaningfully worse variant of finding 3
+    (a transient exposure window) turned into a permanent, exclusive
+    takeover.
+
+    Fix: /config can no longer bootstrap the FIRST secret over the
+    network at all -- only rotate an existing one (already safely gated,
+    since reaching /config at all requires the current secret once one
+    exists). The first secret must come from ORGANISER_SECRET (env var)
+    or a local edit of the config file.
+
+    This test proves the exploit chain is broken at every step: the
+    attacker's POST is rejected, the legitimate owner keeps their
+    (pre-existing, always-open) access, and the attacker's chosen
+    "secret" grants nothing because it was never actually set."""
+    with running_agent(agent_binary, secret=None) as (base, _):
+        status, _ = _get(base, "/status")
+        assert status == 200  # documented-open baseline (finding 3)
+
+        status, body = _post(base, "/config", {"secret": "attacker-chosen-secret"})
+        assert status == 403, f"expected clean 403 rejection, got {status}: {body!r}"
+
+        # Confirm nothing was actually persisted -- not just that this
+        # one response said 403.
+        status, body = _get(base, "/config")
+        assert status == 200
+        assert json.loads(body)["secret_set"] is False, (
+            "REGRESSION: finding 20 is back -- a secret was set via /config "
+            "with zero credentials. This is a HIGH-severity finding if it "
+            "starts failing again."
+        )
+
+
+def test_legitimate_secret_rotation_still_works_once_a_secret_exists(agent_binary):
+    """Companion to the fix above: confirms the fix doesn't overreach --
+    once a secret exists, /config can still rotate it normally, gated by
+    already knowing the current secret.
+
+    Bootstraps the initial secret via a local config-file edit (one of
+    the two ways the finding-20 fix now allows), NOT via ORGANISER_SECRET
+    -- an env-var-sourced secret is intentionally immutable via /config
+    at runtime (env var always wins, by design, so a service-managed
+    deployment isn't silently overridable from the local dashboard);
+    using it here would test that immutability instead of rotation."""
+    isolated_home = tempfile.mkdtemp(prefix="organiser-agent-test-home-")
+    config_dir = os.path.join(isolated_home, ".config", "organiser-agent")
+    os.makedirs(config_dir, exist_ok=True)
+    with open(os.path.join(config_dir, "machine.json"), "w") as f:
+        json.dump({"machine_id": "test-rotation", "secret": "file-bootstrapped-secret"}, f)
+
+    port = _free_port()
+    env = os.environ.copy()
+    env.pop("ORGANISER_SECRET", None)
+    env["ORGANISER_PORT"] = str(port)
+    env["HOME"] = isolated_home
+    env["XDG_CONFIG_HOME"] = os.path.join(isolated_home, ".config")
+    proc = subprocess.Popen(agent_binary, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    try:
+        base = f"http://127.0.0.1:{port}"
+        for _ in range(50):
+            try:
+                urllib.request.urlopen(f"{base}/status", timeout=0.5)
+            except urllib.error.HTTPError:
+                pass
+            except Exception:
+                if proc.poll() is not None:
+                    pytest.fail(f"organiser-agent exited early:\n{proc.stdout.read().decode(errors='replace')}")
+                time.sleep(0.1)
+                continue
+            break
+        else:
+            pytest.fail("organiser-agent never came up")
+
+        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        assert status == 200, "file-bootstrapped secret should be active"
+
+        status, body = _post(
+            base, "/config", {"secret": "rotated-secret"},
+            headers={"X-Organiser-Secret": "file-bootstrapped-secret"},
+        )
+        assert status == 200, f"legitimate rotation should succeed, got {status}: {body!r}"
+
+        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        assert status == 401, "old secret should no longer work after rotation"
+
+        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "rotated-secret"})
+        assert status == 200, "new secret should work after rotation"
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+        shutil.rmtree(isolated_home, ignore_errors=True)
+
+
+def test_machine_name_change_unaffected_by_the_secret_bootstrap_guard(agent_binary):
+    """Confirms the finding-20 fix is scoped precisely to the SECRET
+    field -- machine_name is not security-sensitive (it's a display
+    label, not a credential) and must remain settable even with no
+    secret configured yet."""
+    with running_agent(agent_binary, secret=None) as (base, _):
+        status, body = _post(base, "/config", {"machine_name": "my-desktop"})
+        assert status == 200, f"machine_name change should not be blocked, got {status}: {body!r}"
+        assert json.loads(body)["machine_name"] == "my-desktop"
