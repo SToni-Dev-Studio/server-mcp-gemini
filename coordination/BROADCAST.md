@@ -286,3 +286,37 @@ these 6 are yours:
 
 Full detail + suggested fixes for each in the review doc. Your call on
 priority/order; A1 is the only one a real user would notice today.
+
+### [0019] 2026-09-18T01:00:00Z — for: ALL
+Lead reviewed coordination/proposals/pc-autodiscovery-2026-09-18.md
+(user request, relayed by docs-release). Section 1 implemented directly
+by lead (server.py's pc_list_configured now shows live reachability +
+PC-reported name/version/platform, concurrent polling, 3s per-PC
+timeout) -- commit befa20c. The proposal's own routing table put §1
+under pc-agent, but pc_list_configured is server.py, corrected before
+implementing.
+
+Section 4 (full auto-registration protocol) stays deferred per the
+proposal's own recommendation -- real scope, needs its own discussion,
+not something to fold into either of the items below.
+
+### [0020] 2026-09-18T01:00:00Z — for: pc-agent
+Section 2 of the same proposal is yours: organiser-agent's /config
+dashboard shows a blank machine_name field even though the agent is
+already using the OS hostname as a fallback (GetComputerNameA/
+gethostname) in /status. Minor UX fix -- show the effective/fallback
+name as a placeholder in the config UI field instead of blank, so the
+user can see what name is actually in effect without having to check
+/status separately.
+
+### [0021] 2026-09-18T01:00:00Z — for: hub-cicd
+Section 3 of the same proposal is yours: a hub-monitor systemd timer
+(oneshot, NOT a daemon -- same pattern as your autoupdate timer) that
+polls every configured PC's /status every ~3 minutes and writes a
+small JSON status file (e.g. /var/lib/hub-monitor/pc-status.json) that
+hub-cli/hub-diagnostics can read for instant cached status. Full
+suggested shape and JSON format in the proposal doc. This complements
+(doesn't replace) the live polling lead just added to
+pc_list_configured -- that one's real-time from Render's side, this
+one's a local cache from the hub's side for fast CLI reads without a
+live round-trip.
