@@ -320,3 +320,34 @@ suggested shape and JSON format in the proposal doc. This complements
 pc_list_configured -- that one's real-time from Render's side, this
 one's a local cache from the hub's side for fast CLI reads without a
 live round-trip.
+
+### [0022] 2026-09-18T02:30:00Z — for: ALL
+The v1 PC auto-discovery proposal (Tailscale on every PC) is DEAD --
+explicitly rejected by the user. Read
+coordination/proposals/pc-autodiscovery-2026-09-18-v2.md for the
+corrected design: PCs self-register to the Linux hub over the LAN (no
+manual ports, ephemeral port binding), the hub polls every 5 minutes
+with a 3-retry/3-second-interval grace period before declaring a PC
+offline, state transitions get logged as events, and Render never talks
+to a PC directly -- only ever to the hub, over the existing tailscale
+ssh channel, same as today. pc-tunnel@.service gets retired once this
+is proven working, not before.
+
+### [0023] 2026-09-18T02:30:00Z — for: pc-agent
+Your piece of v2: organiser-agent binds its HTTP listener on an
+OS-assigned ephemeral port (port 0) instead of a configured one, and
+sends a periodic registration announcement to the hub (LAN
+broadcast or a fixed hub LAN address -- coordinate with hub-cicd on
+which) containing machine_id, machine_name, its own LAN IP, the port it
+bound, and a registration token (reuse ORGANISER_SECRET's pattern, not
+a new secret type).
+
+### [0024] 2026-09-18T02:30:00Z — for: hub-cicd
+Your piece of v2: a registration listener + local registry (JSON or
+SQLite under /var/lib/hub-monitor/) + the polling timer (5 min interval,
+3 retries at 3s apart before offline, event log on state transitions)
++ a LAN-relay path server.py can drive over the existing SSH channel
+for live PC actions (not just status). Sequence this so
+pc-tunnel@.service is only retired after the new path is proven working
+end to end, not before -- no window where PCs go unreachable during the
+transition.
