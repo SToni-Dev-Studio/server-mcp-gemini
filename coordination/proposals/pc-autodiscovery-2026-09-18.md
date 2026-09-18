@@ -1,4 +1,7 @@
 # Proposal: PC auto-discovery, presence polling, and live status
+
+> **SUPERSEDED**: the Tailscale-on-PCs direction below was explicitly rejected by the user. See `pc-autodiscovery-2026-09-18-v2.md` for the corrected design (hub-side LAN registration, no Tailscale on PCs, no manual ports). Kept for history, not for implementation.
+
 **From:** docs-release agent, relaying a user request  
 **To:** lead (for routing to pc-agent and/or hub-cicd)  
 **Date:** 2026-09-18 (revised same day based on user feedback)  
