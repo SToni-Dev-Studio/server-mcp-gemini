@@ -491,52 +491,57 @@ def find_duplicates():
 def screenshot():
     _check_auth()
     import base64, io
-    body = request.get_json(force=True) or {}
+
+    body = request.get_json(force=True, silent=True) or {}
     save_path = body.get("save_path", "")
     if save_path:
         blocked = _reject_if_protected(Path(save_path).expanduser())
         if blocked:
             return blocked
+
+    img_bytes = None
+    size_str = ""
+
+    # 1. Try PIL (Pillow)
     try:
         import PIL.ImageGrab as _ig
         img = _ig.grab()
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        img_bytes = buf.getvalue()
+        size_str = f"{img.width}x{img.height}"
     except ImportError:
+        # 2. Fallback to mss
         try:
             import mss, mss.tools
             with mss.mss() as sct:
-                raw = sct.grab(sct.monitors[0])
+                # Use primary monitor (1) if available, fallback to total desktop (0)
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                raw = sct.grab(monitor)
                 img_bytes = mss.tools.to_png(raw.rgb, raw.size)
-                b64 = base64.b64encode(img_bytes).decode()
-                if save_path:
-                    Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-                    with open(save_path, "wb") as f:
-                        f.write(img_bytes)
-                return jsonify({
-                    "image_base64": b64,
-                    "size": f"{raw.size[0]}x{raw.size[1]}",
-                    "saved_path": save_path if save_path else None,
-                })
+                size_str = f"{raw.size[0]}x{raw.size[1]}"
         except ImportError:
-            return jsonify({"error": "No screenshot library found. Run: pip install Pillow or pip install mss"}), 500
+            return jsonify({"error": "No screenshot library found. Install pillow or mss."}), 500
         except Exception as e:
-            return jsonify({"error": f"Screenshot capture failed: {e}"}), 500
+            return jsonify({"error": f"MSS capture failed: {e}"}), 500
     except Exception as e:
-        return jsonify({"error": f"Screenshot capture failed: {e}"}), 500
+        return jsonify({"error": f"PIL capture failed: {e}"}), 500
 
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    img_bytes = buf.getvalue()
-    b64 = base64.b64encode(img_bytes).decode()
-    if save_path:
-        Path(save_path).parent.mkdir(parents=True, exist_ok=True)
-        with open(save_path, "wb") as f:
-            f.write(img_bytes)
-    return jsonify({
-        "image_base64": b64,
-        "size": f"{img.width}x{img.height}",
-        "saved_path": save_path if save_path else None,
-    })
+    # 3. Centralized File Saving & Response
+    try:
+        if save_path:
+            p = Path(save_path).expanduser()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_bytes(img_bytes)
 
+        b64 = base64.b64encode(img_bytes).decode("ascii")
+        return jsonify({
+            "image_base64": b64,
+            "size": size_str,
+            "saved_path": save_path if save_path else None,
+        })
+    except Exception as e:
+        return jsonify({"error": f"Failed saving image or encoding response: {e}"}), 500
 
 @app.post("/write_file")
 def write_file():
