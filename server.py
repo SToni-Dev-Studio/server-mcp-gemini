@@ -866,11 +866,44 @@ async def _org_post(path: str, body: dict, pc: str = "default") -> dict:
 
 @mcp.tool()
 async def pc_list_configured() -> str:
-    """List every PC configured in the PCS registry (name + tunnel port; secrets are never shown)."""
+    """
+    List every PC configured in the PCS registry, with LIVE reachability
+    status (each PC's own /status is polled concurrently, 3s timeout per
+    PC so one down machine doesn't slow down the whole call). Secrets
+    are never shown.
+
+    Per coordination/proposals/pc-autodiscovery-2026-09-18.md section 1
+    (user request, relayed and scoped by agent/docs-release): the old
+    version only echoed the static PCS registry, so a PC being down was
+    invisible until some other tool call against it failed. This shows
+    reachability, the PC's own reported name (its Windows hostname by
+    default -- see organiser-agent's machine_name/GetComputerNameA
+    fallback), version, and platform up front.
+    """
     if not _PC_REGISTRY:
         return "No PCs configured."
-    lines = [f"- {name} (port {entry.get('port')})" for name, entry in sorted(_PC_REGISTRY.items())]
-    return "\n".join(lines)
+
+    async def _check_one(name: str, entry: dict) -> str:
+        port = entry.get("port")
+        try:
+            data = await asyncio.wait_for(_org_get("/status", pc=name), timeout=3.0)
+            reported_name = data.get("machine_name") or data.get("machine_id", "?")
+            version = data.get("version", "?")
+            platform = data.get("platform", "?")
+            return f'- {name} (port {port})  ✅ reachable  name="{reported_name}"  {version}  {platform}'
+        except asyncio.TimeoutError:
+            return f"- {name} (port {port})  ⚠️ unreachable (timeout after 3s)"
+        except Exception as e:
+            return f"- {name} (port {port})  ⚠️ unreachable ({e})"
+
+    names = sorted(_PC_REGISTRY.keys())
+    results = await asyncio.gather(
+        *[_check_one(name, _PC_REGISTRY[name]) for name in names],
+        return_exceptions=False,  # _check_one already catches everything itself
+    )
+    reachable_count = sum(1 for r in results if "✅" in r)
+    header = f"PC Registry ({len(names)} configured, {reachable_count} reachable):\n"
+    return header + "\n".join(results)
 
 
 @mcp.tool()

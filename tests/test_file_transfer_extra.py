@@ -276,3 +276,57 @@ def test_codespace_read_rejects_oversized_file_before_reading(monkeypatch):
     except ValueError as e:
         assert "over the" in str(e)
     assert not any("base64 -w0" in c for c in calls)
+
+
+def test_pc_list_configured_shows_live_status(monkeypatch):
+    """pc-autodiscovery proposal section 1: pc_list_configured now polls
+    each PC live instead of just echoing the static registry."""
+    monkeypatch.setattr(srv, "_PC_REGISTRY", {
+        "desktop": {"port": 7842},
+        "laptop": {"port": 7843},
+    })
+
+    async def fake_org_get(path, params=None, pc="default"):
+        if pc == "desktop":
+            return {"machine_name": "SEPISO-DESKTOP", "version": "2.1.0-cpp", "platform": "Windows"}
+        raise ConnectionRefusedError("connection refused")
+
+    monkeypatch.setattr(srv, "_org_get", fake_org_get)
+    result = asyncio.run(srv.pc_list_configured())
+
+    assert "2 configured, 1 reachable" in result
+    assert "SEPISO-DESKTOP" in result
+    assert "\u2705" in result  # desktop reachable
+    assert "laptop" in result and "unreachable" in result
+
+
+def test_pc_list_configured_a_slow_pc_does_not_block_others(monkeypatch):
+    """One PC timing out must not make the whole call wait for it --
+    proposal explicitly calls for asyncio.gather with per-PC timeout."""
+    monkeypatch.setattr(srv, "_PC_REGISTRY", {
+        "fast": {"port": 1},
+        "slow": {"port": 2},
+    })
+
+    async def fake_org_get(path, params=None, pc="default"):
+        if pc == "slow":
+            await asyncio.sleep(10)  # would fail the test's own timeout if actually awaited fully
+        return {"machine_name": pc, "version": "1.0", "platform": "Linux"}
+
+    monkeypatch.setattr(srv, "_org_get", fake_org_get)
+
+    async def run_with_timeout():
+        return await asyncio.wait_for(srv.pc_list_configured(), timeout=5.0)
+
+    result = asyncio.run(run_with_timeout())
+    assert "fast" in result
+    assert "slow" in result
+    assert "unreachable" in result  # the 3s per-PC timeout fired before the outer 5s test timeout
+
+
+def test_pc_list_configured_empty_registry_unchanged(monkeypatch):
+    """The 'no PCs configured at all' case is unchanged by this feature --
+    still a plain message, no polling attempted."""
+    monkeypatch.setattr(srv, "_PC_REGISTRY", {})
+    result = asyncio.run(srv.pc_list_configured())
+    assert result == "No PCs configured."
