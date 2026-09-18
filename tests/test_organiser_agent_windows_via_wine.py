@@ -7,7 +7,7 @@ This closes several gaps that were previously flagged as "static
 analysis only, needs a real Windows target" throughout SECURITY_FINDINGS.md:
   - is_protected_path's canonicalization, INCLUDING the specific
     forward-slash-vs-backslash traversal normalization case that
-    tests/test_organiser_agent.py's Flask-side equivalent test honestly
+tests/test_organiser_agent.py's Flask-side equivalent test honestly
     marked @unittest.expectedFailure on Linux with a detailed explanation
     of why it can't be verified there. Confirmed here: on real Windows
     path semantics (via Wine, which emulates the actual Win32 API/
@@ -135,8 +135,10 @@ def _get(base, path):
     try:
         with urllib.request.urlopen(req, timeout=8) as r:
             return r.status, r.read()
-    except Exception as e:
-        return getattr(e, "code", -1), getattr(e, "read", lambda: str(e).encode())()
+    except Exception as exc:
+        reader = getattr(exc, "read", None)
+        body = reader() if callable(reader) else str(exc).encode()
+        return getattr(exc, "code", -1), body
 
 
 def _post(base, path, body):
@@ -147,8 +149,10 @@ def _post(base, path, body):
     try:
         with urllib.request.urlopen(req, timeout=8) as r:
             return r.status, r.read()
-    except Exception as e:
-        return getattr(e, "code", -1), getattr(e, "read", lambda: str(e).encode())()
+    except Exception as exc:
+        reader = getattr(exc, "read", None)
+        payload = reader() if callable(reader) else str(exc).encode()
+        return getattr(exc, "code", -1), payload
 
 
 def test_protected_path_blocks_windows_dir_on_real_windows(running_windows_agent):
