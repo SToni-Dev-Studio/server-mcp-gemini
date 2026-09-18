@@ -1,0 +1,71 @@
+# /etc/systemd/system/pc-tunnel@.service
+#
+# Templated unit — one instance per PC. The instance name (%i) matches
+# that PC's name in the PCS registry (the Render env var server.py
+# reads), e.g.:
+#   pc-tunnel@desktop.service
+#   pc-tunnel@laptop.service
+#
+# Each instance reads /etc/pc-tunnel/<name>.conf for that PC's LAN IP
+# and port, and forwards a LOOPBACK-ONLY port on this server to that
+# PC's organiser-agent.
+#
+# Binding to 127.0.0.1 (not 0.0.0.0) is deliberate and safe: Render never
+# connects to this port directly. It reaches it by SSHing into this
+# server (tailscale ssh) and curling 127.0.0.1:<port> FROM here — so
+# nothing outside this machine needs to reach this port at all.
+#
+# Setup, per PC:
+#   1. sudo mkdir -p /etc/pc-tunnel
+#   2. sudo tee /etc/pc-tunnel/<name>.conf <<'EOF'
+#      PC_IP=192.168.1.50
+#      PORT=7842
+#      EOF
+#      (each PC needs a different PORT — 7842, 7843, 7844, ...)
+#   3. Make sure SSH key auth works: ssh sepisotoni@<PC_IP>  (no password)
+#   4. Pin the PC's host key (see SECURITY_FINDINGS.md finding 6 — this
+#      used to be StrictHostKeyChecking=no, which accepts ANY host key
+#      presented at connect time with no warning, so a LAN-position
+#      attacker who could spoof the PC's IP (ARP spoofing, a rogue DHCP
+#      lease, a DNS trick if addressed by name) could silently MITM the
+#      tunnel):
+#        sudo mkdir -p /etc/pc-tunnel/known_hosts.d
+#        ssh-keyscan -H <PC_IP> | sudo tee /etc/pc-tunnel/known_hosts.d/<name> > /dev/null
+#      Do this over a connection you trust (ideally on first setup, on
+#      the same LAN segment, right after configuring the PC) — the whole
+#      point of pinning is to lock in the key you saw *this once* so any
+#      future mismatch is rejected rather than silently accepted.
+#   5. sudo systemctl daemon-reload
+#   6. sudo systemctl enable --now pc-tunnel@<name>
+#   7. sudo systemctl status pc-tunnel@<name>
+#
+# Then add the PC to the PCS env var in Render (or via the admin
+# dashboard at /admin), e.g.:
+#   PCS={"desktop": {"port": 7842, "secret": "..."}, "laptop": {"port": 7843, "secret": "..."}}
+# — port must match PORT in that PC's .conf file; secret must match that
+# PC's own ORGANISER_SECRET (set when you start organiser-agent.exe there).
+
+[Unit]
+Description=SSH tunnel to organiser-agent on PC '%i'
+After=network.target tailscaled.service
+Wants=tailscaled.service
+
+[Service]
+User=sepisotoni
+EnvironmentFile=/etc/pc-tunnel/%i.conf
+ExecStart=/usr/bin/ssh \
+    -NTC \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=3 \
+    -o ExitOnForwardFailure=yes \
+    -o StrictHostKeyChecking=yes \
+    -o UserKnownHostsFile=/etc/pc-tunnel/known_hosts.d/%i \
+    -o BatchMode=yes \
+    -L 127.0.0.1:${PORT}:localhost:${PORT} \
+    sepisotoni@${PC_IP}
+Restart=always
+RestartSec=10
+TimeoutStartSec=30
+
+[Install]
+WantedBy=multi-user.target

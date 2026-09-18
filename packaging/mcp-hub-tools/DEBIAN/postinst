@@ -1,0 +1,39 @@
+#!/bin/sh
+set -e
+
+case "$1" in
+  configure)
+    mkdir -p /etc/pc-tunnel/known_hosts.d
+    chmod 755 /etc/pc-tunnel
+    chmod 755 /etc/pc-tunnel/known_hosts.d
+
+    mkdir -p /etc/hub-cli
+    chmod 700 /etc/hub-cli  # will hold the 0600 credentials file hub-cli.py writes
+
+    if [ -x /usr/bin/systemctl ] && [ -d /run/systemd/system ]; then
+      systemctl daemon-reload || true
+    fi
+
+    cat <<'EOF'
+
+mcp-hub-tools installed:
+  hub-cli          -- manage PC tunnel config (see: hub-cli --help)
+  hub-diagnostics  -- local health checks (see: hub-diagnostics --help)
+  pc-tunnel@.service -- systemd template (see: hub-cli pc add --help)
+
+Next steps for a new PC:
+  1. sudo hub-cli pc add <name> <pc-ip>
+  2. sudo hub-cli pc pin <name>
+  3. Add <name> to the PCS env var on the Render service (or:
+     hub-cli config set-render-credentials --api-key ... --service-id ...
+     then hub-cli render set PCS '{"<name>": {"port": 7842, "secret": "..."}}')
+
+Auto-update is installed but disabled by default. To enable it:
+  sudo systemctl enable --now mcp-hub-tools-autoupdate.timer
+See /usr/share/doc/mcp-hub-tools/README for what it does before enabling.
+
+EOF
+    ;;
+esac
+
+exit 0

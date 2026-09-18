@@ -12,3 +12,9 @@ __pycache__/
 venv/
 .venv/
 node_modules/
+
+# .deb build artifacts (built by packaging/build-deb.sh; CI/release.yml
+# rebuild these fresh from source, they shouldn't be committed)
+packaging/build/
+packaging/*.deb
+packaging/*.deb.sha256

@@ -1,0 +1,15 @@
+[Unit]
+Description=Check for and install mcp-hub-tools updates from GitHub Releases
+# Oneshot, not a daemon (per project guidance: "same spirit as
+# unattended-upgrades, not a custom update protocol") -- runs, does its
+# check, exits. mcp-hub-tools-autoupdate.timer is what makes this
+# periodic; this unit itself has no persistent process.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/mcp-hub-tools/autoupdate.sh
+# Autoupdate needs root (it runs dpkg -i) -- this unit is only ever
+# started by root's timer or manually via sudo systemctl start, never
+# exposed to anything less privileged.
