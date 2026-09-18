@@ -1,193 +1,217 @@
-# Proposal: PC auto-discovery, presence polling, and a live PC status dashboard
-
+# Proposal: PC auto-discovery, presence polling, and live status
 **From:** docs-release agent, relaying a user request  
-**To:** lead (for routing to pc-agent and/or hub-cicd as appropriate)  
-**Date:** 2026-09-18  
-**Status:** Draft — needs lead sign-off before anyone starts building
+**To:** lead (for routing to pc-agent and/or hub-cicd)  
+**Date:** 2026-09-18 (revised same day based on user feedback)  
+**Status:** Draft — needs lead sign-off before anyone starts
 
 ---
 
-## What the user asked for
+## What the user wants (revised)
 
-> "auto-detect for every PC so the PC gets an ID as well with a name
-> of the PC since Windows names PCs, and maybe something like a status
-> thing — basic tools — so that if there is a tool like 'pc list' you
-> can always see what PCs are there and what not, and the Linux server
-> must auto-detect the PCs, it can poll every few minutes or so in
-> order to check if it's still reachable and what not"
-
-Short version: **make `pc_list_configured` show live reachability
-status, not just what's in the PCS registry**, and **reduce the
-manual work of adding a PC by auto-detecting its name from Windows
-itself**.
-
----
-
-## What already exists (don't rebuild these)
-
-Checked directly against current `main` before writing this:
-
-- `organiser-agent` (both builds) already exposes a `/status` endpoint
-  returning `version`, `platform`, `machine_id` (a UUID generated once
-  and persisted to a config file), and `machine_name` (set via
-  `/config`'s `machine_name` field, falling back to the OS hostname via
-  `GetComputerNameA` / `gethostname`). **The Windows hostname is already
-  available today** — `machine_name` in a `/status` response is the
-  PC's own name.
-
-- `pc_list_configured` already lists every entry in the `PCS` registry
-  (name + port; secret never shown).
-
-- `pc_organiser_status(pc)` already pings one PC's agent and returns
-  its version, platform, and reachability status.
-
-- `run_diagnostics()` already checks every configured PC's agent in one
-  pass, but it's a one-shot MCP tool call, not a persistent background
-  poll.
-
-- `hub-cli pc list` (in `scripts/hub-cli.py`, not yet packaged as .deb)
-  lists PCs from the server-side tunnel config, not from the Render-side
-  `PCS` registry — these can drift.
-
-The gap is: **none of this is automatic or live**. You find out a PC is
-down when a tool call fails, not proactively. Adding a PC still requires
-manually syncing the PCS registry in Render with the tunnel config on the
-server. And the PC's own name isn't shown in `pc_list_configured` because
-that only reads the local registry, not the live `/status` endpoint.
+- **Every 5 minutes** polling (not 3 — no need to hammer PCs)
+- **Retry on a missed poll** — if a poll fails, retry 2–3 times at
+  ~3-second intervals before declaring the PC offline (not instant
+  offline on first miss)
+- **Events** when a PC goes offline or comes back online — not just a
+  status file, an actual logged event
+- **No manual port configuration** — shouldn't need to think about
+  ports at all
+- **Auto-registration is the priority** — PCs should appear
+  automatically, not require hand-editing config files
 
 ---
 
-## Proposed changes
+## The port question — two realistic options
 
-### 1. Enrich `pc_list_configured` with live data (server.py)
+The current architecture uses SSH port-forwards with explicit port
+numbers because the PC agent binds a local port and the server tunnels
+to it. The user wants to drop this. Two real alternatives:
 
-Change `pc_list_configured` to call `/status` on each configured PC
-concurrently (with a short timeout, e.g. 3 seconds), and return a
-combined view:
+### Option A — Put PCs directly on the Tailnet (recommended)
 
-```
-PC Registry (2 configured, 2 reachable):
-
-desktop  port=7842  ✅ reachable  name="SEPISO-DESKTOP"  v2.1.0-cpp  Windows
-laptop   port=7843  ⚠️ unreachable (timeout after 3s)
-```
-
-- **Reachable:** shows the name the PC reports for itself (`machine_name`
-  from `/status` — already the Windows hostname by default), version,
-  and platform.
-- **Unreachable:** shows the last-known status if cached (see §3), or
-  just "unreachable" with the error.
-- Concurrent calls so a 2-PC registry doesn't take 6 seconds if one is
-  down.
-
-This is a small change to one existing tool. No new tools needed.
-
-### 2. Auto-populate `machine_name` from Windows hostname on first run (organiser-agent, both builds)
-
-Already done — the agent falls back to `GetComputerNameA` / `gethostname`
-if `machine_name` isn't explicitly configured. The only thing missing is
-**surfacing this in the UI clearly** so the user knows that's what's
-happening. Currently the `/config` dashboard just shows an empty
-`machine_name` field if it hasn't been set, even though the agent is
-already using the OS hostname as the fallback in `/status`. Minor UX fix:
-show the effective name (i.e. the fallback value) as a placeholder in the
-config field, not a blank.
-
-### 3. Background reachability cache on the Linux server (hub-cli or a new hub-monitor service)
-
-The Linux server already runs the SSH tunnels to each PC. It's the right
-place to poll, because it's always on and it's the hub that all traffic
-flows through anyway.
-
-**Suggested shape:**
-
-A simple systemd timer + oneshot service (not a daemon — same pattern as
-the proposed .deb auto-updater in broadcast [0017]):
+Install Tailscale on each Windows PC. The PC agent then binds its HTTP
+server to the Tailscale interface IP (or loopback, reachable via
+Tailscale exit node), and `server.py` reaches it directly via
+`tailscale ssh` to the PC, not via a tunnel through the Linux server.
 
 ```
-hub-monitor.service   — oneshot: polls every configured PC's /status once
-hub-monitor.timer     — runs hub-monitor.service every 3 minutes
+Render → tailscale ssh sepisotoni@SEPISO-DESKTOP → organiser-agent
 ```
 
-What it does each run:
-1. Reads `/etc/pc-tunnel/*.conf` to find configured PCs (name + port).
-2. `curl -sf --max-time 5 http://127.0.0.1:<port>/status` for each.
-3. Writes results to a small JSON file, e.g.
-   `/var/lib/hub-monitor/pc-status.json`:
-   ```json
-   {
-     "updated": "2026-09-18T10:30:00Z",
-     "pcs": {
-       "desktop": {"reachable": true, "name": "SEPISO-DESKTOP",
-                   "version": "2.1.0-cpp", "last_seen": "2026-09-18T10:30:00Z"},
-       "laptop":  {"reachable": false, "last_seen": "2026-09-18T09:15:00Z",
-                   "error": "connection refused"}
-     }
-   }
+- **No ports to configure** — Tailscale handles addressing. The agent
+  can use any fixed internal port (say, always 7842) because the
+  Tailscale network is isolated anyway — no exposure, no collision risk
+  between PCs on different machines.
+- **No `pc-tunnel@.service` units needed** — the Linux server is no
+  longer the routing hub for PC traffic, just for `server_*` tools.
+- **Auto-registration becomes trivial** — when a PC joins the Tailnet,
+  `server.py` can discover it via the Tailscale API (list devices →
+  filter by tag or name pattern → try `/status`).
+- **Tradeoff:** every PC needs Tailscale installed. For a personal setup
+  this is fine (Tailscale is free for personal use, ~5 MB, dead simple
+  to install). The PC agent would need a small change to bind on the
+  right interface.
+
+### Option B — Keep the tunnel model, drop manual port config
+
+Keep the current SSH-tunnel architecture but auto-assign ports:
+- The hub-monitor assigns each PC a port from a pool (e.g. 7842, 7843,
+  7844...) based on a hash of its `machine_id` or registration order.
+- The PC agent advertises "I want port X" in its registration ping;
+  the server accepts or assigns one.
+
+This is more complex than Option A and still has ports under the hood —
+just hidden from the user. Option A is cleaner.
+
+**Recommendation: Option A (Tailscale on PCs).** The project already
+uses Tailscale for the Linux server; extending it to PCs is a natural
+fit and eliminates the whole port-management problem for real rather
+than papering over it.
+
+---
+
+## Full revised design (assuming Option A — Tailscale on PCs)
+
+### PC agent changes
+
+1. **Tailscale-aware binding** — the agent binds to `0.0.0.0` (or
+   specifically the Tailscale interface) on a fixed internal port
+   (always 7842, or configurable but with a sane default). Since
+   Tailscale is the network boundary, binding wider than loopback is
+   safe within the tailnet.
+
+2. **Registration on startup** — when the agent starts, it sends a
+   registration ping to a known endpoint on the Linux server (or
+   directly to `server.py` via a Tailscale-reachable URL, TBD). The
+   ping includes:
+   - `machine_id` (already exists — persisted UUID)
+   - `machine_name` (already exists — Windows hostname fallback)
+   - `tailscale_ip` (the PC's Tailscale IP, readable from
+     `tailscale ip -4` or the Tailscale local API)
+   - `version`, `platform`
+
+3. **Registration auth** — a shared registration token (set in the
+   agent's config, same as `ORGANISER_SECRET` today) so random machines
+   can't self-register. Or, simpler: only accept registrations from
+   IPs already on the Tailnet (Tailscale handles that boundary).
+
+### Server-side changes (`server.py`)
+
+1. **PC registry becomes dynamic** — instead of (or alongside) the
+   static `PCS` env var, `server.py` maintains a small in-memory
+   registry of known PCs, populated from a JSON file written by
+   hub-monitor. Fallback to `PCS` for anyone who wants static config.
+
+2. **`pc_list_configured` shows live status** — calls each PC's
+   `/status` concurrently (3-second timeout, `asyncio.gather` with
+   `return_exceptions=True`) and shows:
    ```
-4. Exits. No persistent process, no socket, no daemon to crash.
+   PC Registry (2 known, 1 online, 1 offline):
+   SEPISO-DESKTOP  ✅ online   v2.1.0-cpp  last_seen=just now
+   SEPISO-LAPTOP   ⚠️ offline  last_seen=14 minutes ago
+   ```
 
-`hub-cli pc list` and `hub-diagnostics` can then read this file for
-instant status (no live poll needed for a CLI invocation), and `server.py`
-can SSH-cat it as part of `pc_list_configured` for cached reachability
-without waiting for a live poll on every MCP tool call.
+3. **New `pc_events` tool** (or folded into diagnostics) — returns
+   recent online/offline events from the hub-monitor event log.
 
-The timer interval (3 minutes suggested) means you find out about a PC
-going offline within 3 minutes, not only when you next run a tool against
-it.
+### Hub-side changes (hub-cli / hub-monitor)
 
-### 4. Auto-detect new PCs (stretch goal — probably scope for a separate pass)
+1. **hub-monitor systemd timer** — polls every **5 minutes** (not 3).
+   On each poll:
+   - Pings each known PC's `/status` via Tailscale (direct HTTP, no
+     SSH hop needed once PCs are on the tailnet).
+   - If a poll **fails**: retries **3 times at 3-second intervals**
+     before marking as offline.
+   - If status **changes** (online→offline or offline→online): appends
+     an event to `/var/lib/hub-monitor/events.jsonl`:
+     ```json
+     {"ts": "2026-09-18T10:35:00Z", "pc": "SEPISO-DESKTOP", "event": "offline", "last_version": "2.1.0-cpp"}
+     {"ts": "2026-09-18T11:02:00Z", "pc": "SEPISO-DESKTOP", "event": "online",  "version": "2.1.0-cpp"}
+     ```
+   - Updates `/var/lib/hub-monitor/pc-status.json` with current state.
 
-The user mentioned "the Linux server must auto-detect the PCs." Fully
-automatic discovery (no config at all) is hard without a discovery
-protocol — the server doesn't know what IP a new PC might be at. But a
-**semi-automatic flow** is achievable:
+2. **Registration endpoint** — a small HTTP endpoint (or a special
+   path on hub-cli if it grows an HTTP mode, or just a webhook that
+   writes to a pending-registrations file that hub-monitor picks up).
+   When a PC registers:
+   - Writes to `/var/lib/hub-monitor/pending.json` if not already known.
+   - On next `hub-cli pc list`, shows pending PCs with an "approve?"
+     prompt.
+   - `hub-cli pc approve SEPISO-DESKTOP` moves it to the active
+     registry, writes its Tailscale IP + name to the status file, and
+     optionally pushes the updated `PCS` to Render via the API so
+     `server.py` picks it up.
+   - Fires an `"online"` event.
 
-When the PC agent starts up for the first time, it could POST a
-registration ping to a known endpoint on the server (e.g. the hub-cli's
-HTTP interface, or a small dedicated endpoint). The server would then:
-1. Show a pending-approval entry in `hub-cli pc list`.
-2. Let the user approve it with `hub-cli pc approve <name>`, which writes
-   the `.conf` file and enables the tunnel service.
+3. **`hub-cli pc list`** reads from `pc-status.json` for instant output
+   (no live poll on CLI invocation — that's the timer's job).
 
-This needs a shared secret for the registration step (otherwise any
-machine on the LAN could register itself) and a way for the PC to know
-the server's address — both solvable, but not trivially. **Recommend
-deferring this to a separate proposal** unless the user specifically wants
-it now. The §1–3 changes above give most of the value (live status,
-Windows hostname auto-populated, background polling) without requiring a
-new registration protocol.
-
----
-
-## What this is NOT proposing
-
-- Any change to how PCs are *routed* (the `PCS` registry + tunnel model
-  stays exactly as-is — this is purely about visibility and monitoring).
-- A new persistent daemon (§3 is a timer + oneshot, not a long-running
-  process).
-- Breaking any existing tool signatures (§1 is backward-compatible —
-  `pc_list_configured` still works, it just returns more information).
-
----
-
-## Suggested routing
-
-| Item | Who |
-|---|---|
-| §1 — enrich `pc_list_configured` | pc-agent (touches server.py's PC tool area) |
-| §2 — UX fix for machine_name placeholder | pc-agent (touches organiser-agent config dashboard) |
-| §3 — hub-monitor systemd timer | hub-cicd (systemd units + hub-cli integration is their territory) |
-| §4 — auto-registration (if approved) | new scope, new discussion |
-
-Lead to decide whether to act on any of this, route it, or park it.
+4. **`hub-cli pc remove <name>`** — marks a PC as removed, fires an
+   `"offline"` event.
 
 ---
 
-## One thing to verify before starting §1
+## What this removes entirely
 
-`pc_list_configured` calling `/status` on every PC concurrently is only
-safe if the timeout is short and failures are caught cleanly — a PC that's
-down shouldn't make the whole tool call hang. Recommend
-`asyncio.gather(*[...], return_exceptions=True)` with a 3-second
-per-PC timeout, same pattern already used in `_run_diagnostics`.
+- `pc-tunnel@.service` and its `.conf` files per PC — no longer needed
+  once PCs are on the Tailnet and `server.py` reaches them directly.
+- Manual port assignment — gone.
+- Manual `PCS` env var editing — optional fallback only; normal flow is
+  auto-registration.
+- The `StrictHostKeyChecking` / `ssh-keyscan` setup step — Tailscale
+  handles identity; no host key pinning needed for the PC leg.
+
+---
+
+## What stays the same
+
+- The Linux server's role for `server_*` tools (Tailscale SSH to the
+  hub for all server-side operations) — unchanged.
+- `organiser-agent`'s HTTP API (`/status`, `/list`, `/move`, etc.) —
+  unchanged, just reachable differently.
+- The `PCS` env var as a static fallback for anyone who wants it —
+  unchanged.
+- `machine_id` and `machine_name` in `/status` — already there,
+  already works.
+
+---
+
+## Open questions for the lead
+
+1. **Tailscale on PCs: acceptable dependency?** It's free for personal
+   use and ~5 MB, but it's a real new dependency for every Windows PC.
+   If the answer is no, Option B (auto-assigned ports, same tunnel
+   model) is the fallback — more complex but no new software needed.
+
+2. **Registration auth model**: shared token (same as `ORGANISER_SECRET`
+   today, just repurposed) or Tailscale-network-membership-as-auth
+   (simpler: only devices on the tailnet can even reach the registration
+   endpoint, so no extra token needed)? The second option is cleaner
+   but requires Tailscale on PCs.
+
+3. **`server.py` reaching PCs directly vs. via the hub**: with Tailscale
+   on PCs, `server.py` on Render *could* reach each PC directly if
+   Render's server is also on the tailnet, but it currently isn't (only
+   the Linux server has Tailscale). The easier path is: `server.py`
+   still SSHes to the Linux server, and the Linux server curls the PC's
+   Tailscale IP directly — keeping Render out of the tailnet but
+   eliminating the port-forward tunnel. Worth confirming this is the
+   intended shape.
+
+4. **Scope split**: this touches pc-agent (agent-side changes), hub-cicd
+   (hub-monitor, hub-cli), and server.py (dynamic registry, new tools).
+   Should this be a single coordinated feature branch or three
+   coordinated branches? Given the coordination gap that surfaced in
+   broadcast [0014], probably worth a single feature branch with one
+   owner, or at minimum an explicit handoff protocol.
+
+---
+
+## Priority order if approved
+
+1. Tailscale-on-PCs decision (gates everything else)
+2. Hub-monitor timer + event log (observable immediately once PCs are on tailnet)
+3. `pc_list_configured` enriched with live status
+4. Auto-registration + approval flow
+5. `pc_events` tool in `server.py`
+6. Retire `pc-tunnel@.service` (once everything else is working)
