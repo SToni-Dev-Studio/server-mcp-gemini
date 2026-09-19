@@ -465,20 +465,44 @@ async def check_account_status() -> str:
 # ---------------------------------------------------------------------------
 
 async def _ssh_server(command: str, timeout: int = 60) -> str:
-    """Run a command on the home Linux server via tailscale ssh."""
+    """Run a command on the home Linux server via tailscale ssh with standard ssh fallback."""
+    # 1. Try tailscale ssh
     ssh_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
-    proc = await asyncio.create_subprocess_exec(
-        *ssh_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
     try:
+        proc = await asyncio.create_subprocess_exec(
+            *ssh_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=min(timeout, 10))
+        output = (stdout.decode() + stderr.decode()).strip()
+        if proc.returncode == 0 and "Connection closed" not in output:
+            return output or f"(exited {proc.returncode}, no output)"
+    except Exception:
+        pass
+
+    # 2. Fallback to standard SSH
+    key_args = ["-i", SERVER_SSH_KEY] if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY)) else []
+    fallback_cmd = [
+        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"
+    ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *fallback_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = (stdout.decode() + stderr.decode()).strip()
         return output or f"(exited {proc.returncode}, no output)"
     except asyncio.TimeoutError:
-        proc.kill()
+        try:
+            proc.kill()
+        except Exception:
+            pass
         return f"Command timed out after {timeout}s"
+    except Exception as e:
+        return f"SSH execution failed: {e}"
 
 
 # ---------------------------------------------------------------------------
