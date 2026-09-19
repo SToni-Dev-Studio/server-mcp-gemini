@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     Installs or upgrades organiser-agent (the Windows PC agent for
-    server-mcp-claude) from a GitHub Release: downloads the build,
+    server-mcp-gemini) from a GitHub Release: downloads the build,
     verifies its SHA-256 checksum, installs it, registers/refreshes the
     Scheduled Task that runs it, and verifies it actually responds
     afterward.
@@ -93,7 +93,7 @@ param(
     [string]$Secret,
     [int]$Port,
     [string]$Owner = "mienkek13-netizen",
-    [string]$Repo = "server-mcp-claude",
+    [string]$Repo = "server-mcp-gemini",
     [string]$GitHubToken,
     [string]$InstallDir = "C:\Program Files\OrganiserAgent",
     [string]$TaskName = "OrganiserAgent",

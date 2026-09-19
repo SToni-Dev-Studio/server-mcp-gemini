@@ -18,7 +18,7 @@
 # for small projects, made explicit rather than implied.
 set -euo pipefail
 
-REPO="mienkek13-netizen/server-mcp-claude"
+REPO="mienkek13-netizen/server-mcp-gemini"
 PACKAGE_NAME="mcp-hub-tools"
 GITHUB_API_BASE="${GITHUB_API_BASE:-https://api.github.com}"  # overridable for tests
 CURRENT_VERSION="$(dpkg-query -W -f='${Version}' "$PACKAGE_NAME" 2>/dev/null || echo "0")"

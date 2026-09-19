@@ -31,7 +31,7 @@ See `SKILL.md` for the complete list with parameters.
 
 ```bash
 git clone <this repo>
-cd server-mcp-claude
+cd server-mcp-gemini
 pip install -r requirements.txt
 cp .secrets.example .secrets   # fill in whichever sections you need —
                                 # every subsystem is independently optional

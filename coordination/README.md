@@ -1,4 +1,4 @@
-# Coordination Protocol — server-mcp-claude
+# Coordination Protocol — server-mcp-gemini
 
 Shared workspace for Claude-side agents on this project. One "lead"
 session (talks to the user, owns integration) and subagent sessions,
@@ -14,7 +14,7 @@ each on their own branch, reporting back through this directory.
   file.
 
 ## Access
-- Repo: mienkek13-netizen/server-mcp-claude (private), account slot
+- Repo: mienkek13-netizen/server-mcp-gemini (private), account slot
   `tertiary`.
 - Inside a codespace shell you'll need a GH token to push (provided to
   you out-of-band by the user for this session). Never commit it,

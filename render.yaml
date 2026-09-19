@@ -1,5 +1,5 @@
 # Render Blueprint (https://render.com/docs/blueprint-spec) for
-# server-mcp-claude's server.py.
+# server-mcp-gemini's server.py.
 #
 # This is the supported deployment target — see ARCHITECTURE.md's
 # "Deployment target" section and coordination/status/hub-cicd.md for

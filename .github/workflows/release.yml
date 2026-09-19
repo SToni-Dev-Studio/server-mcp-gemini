@@ -102,7 +102,7 @@ jobs:
           DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           cat > dist/RELEASE_INFO.txt <<EOF
-          server-mcp-claude release
+          server-mcp-gemini release
           Version:    ${TAG}
           Commit:     ${SHA}
           Built:      ${DATE}
@@ -116,23 +116,23 @@ jobs:
           cp scripts/install-organiser-agent.ps1 bundle/scripts/ 2>/dev/null || true
           cp dist/RELEASE_INFO.txt bundle/
 
-          (cd bundle && zip -r "../server-mcp-claude-${TAG}.zip" .)
+          (cd bundle && zip -r "../server-mcp-gemini-${TAG}.zip" .)
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: "server-mcp-claude ${{ steps.version.outputs.tag }}"
+          name: "server-mcp-gemini ${{ steps.version.outputs.tag }}"
           generate_release_notes: true
           body: |
-            Automated release of server-mcp-claude ${{ steps.version.outputs.tag }}
+            Automated release of server-mcp-gemini ${{ steps.version.outputs.tag }}
             (commit ${{ github.sha }}).
 
             **Assets:**
             - `organiser-agent.exe` + `organiser-agent.exe.sha256` — Windows PC
               agent. Install with `scripts/install-organiser-agent.ps1` (verifies
               the checksum for you), or manually per `BUILD_AND_SETUP.md`.
-            - `server-mcp-claude-${{ steps.version.outputs.tag }}.zip` — server.py,
+            - `server-mcp-gemini-${{ steps.version.outputs.tag }}.zip` — server.py,
               requirements.txt, Dockerfile/start.sh, pc-tunnel@.service, the
               installer script, and all docs (README/ARCHITECTURE/BUILD_AND_SETUP/
               SKILL) at this version.
@@ -142,4 +142,4 @@ jobs:
           files: |
             dist/organiser-agent.exe
             dist/organiser-agent.exe.sha256
-            server-mcp-claude-${{ steps.version.outputs.tag }}.zip
+            server-mcp-gemini-${{ steps.version.outputs.tag }}.zip

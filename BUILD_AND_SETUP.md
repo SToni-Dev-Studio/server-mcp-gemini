@@ -71,7 +71,7 @@ also require GitHub auth) -- get the script one of these ways instead:
 Copy-Item \path\to\clone\scripts\install-organiser-agent.ps1 .
 
 # Option B: download it from a tagged release's bundle zip
-# (server-mcp-claude-<tag>.zip, published by .github/workflows/release.yml)
+# (server-mcp-gemini-<tag>.zip, published by .github/workflows/release.yml)
 # -- unzip it, then run the copy inside scripts\.
 
 # Then, in an elevated PowerShell prompt, from wherever you put it:

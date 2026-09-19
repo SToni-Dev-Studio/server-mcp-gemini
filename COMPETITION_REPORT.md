@@ -1,6 +1,6 @@
-# Competition Report — server-mcp-claude
+# Competition Report — server-mcp-gemini
 
-**Repo:** `mienkek13-netizen/server-mcp-claude`
+**Repo:** `mienkek13-netizen/server-mcp-gemini`
 **Baseline:** `sepisotoni/codespaces-mcp` @ `26ec6d1` (imported unmodified as the
 first commit on this repo — see that commit's message for what was
 stripped and why: `.env`/`.secrets`/`.secrets.txt` placeholder files and a

@@ -5,9 +5,9 @@ Priority: optional
 Architecture: all
 Depends: python3 (>= 3.10), openssh-client, systemd
 Recommends: tailscale
-Maintainer: server-mcp-claude project <noreply@example.invalid>
-Homepage: https://github.com/mienkek13-netizen/server-mcp-claude
-Description: Hub-side tools for the server-mcp-claude Windows-PC tunnel fleet
+Maintainer: server-mcp-gemini project <noreply@example.invalid>
+Homepage: https://github.com/mienkek13-netizen/server-mcp-gemini
+Description: Hub-side tools for the server-mcp-gemini Windows-PC tunnel fleet
  Installs hub-diagnostics.py (local health checks for pc-tunnel@.service
  instances, Tailscale, and disk space) and hub-cli.py (manage PC tunnel
  config, pin SSH host keys, and read/write the Render-hosted service's

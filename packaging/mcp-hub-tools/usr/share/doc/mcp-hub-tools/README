@@ -1,7 +1,7 @@
 mcp-hub-tools
 =============
 
-Hub-side tools for the server-mcp-claude project's Windows-PC tunnel
+Hub-side tools for the server-mcp-gemini project's Windows-PC tunnel
 fleet. Installs:
 
   /usr/bin/hub-cli          -- manage PC tunnel config, pin SSH host

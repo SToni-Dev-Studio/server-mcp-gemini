@@ -1,4 +1,4 @@
-# Security QA Findings — server-mcp-claude
+# Security QA Findings — server-mcp-gemini
 
 Author: security-qa subagent. All findings below were dynamically verified
 against real, compiled code running in an isolated sandbox (this codespace/
