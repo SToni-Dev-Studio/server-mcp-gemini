@@ -2,7 +2,7 @@
 # build-deb.sh — assembles and builds the mcp-hub-tools Proposal v2 .deb package.
 set -euo pipefail
 
-VERSION="${1:-0.2.0-v2-gemini}"
+VERSION="${1:-0.3.0-gemini}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PKG_DIR="$SCRIPT_DIR/mcp-hub-tools"
@@ -18,6 +18,10 @@ cp -r "$PKG_DIR" "$BUILD_DIR"
 cp "$REPO_ROOT/scripts/hub-cli.py" "$BUILD_DIR/usr/lib/mcp-hub-tools/hub-cli.py"
 cp "$REPO_ROOT/scripts/hub-diagnostics.py" "$BUILD_DIR/usr/lib/mcp-hub-tools/hub-diagnostics.py"
 cp "$REPO_ROOT/scripts/hub-monitor.py" "$BUILD_DIR/usr/lib/mcp-hub-tools/hub-monitor.py"
+if [ -f "$REPO_ROOT/scripts/hub_pc_registry.py" ]; then
+    cp "$REPO_ROOT/scripts/hub_pc_registry.py" "$BUILD_DIR/usr/lib/mcp-hub-tools/hub_pc_registry.py"
+    chmod 755 "$BUILD_DIR/usr/lib/mcp-hub-tools/hub_pc_registry.py"
+fi
 cp "$REPO_ROOT/pc-tunnel@.service" "$BUILD_DIR/lib/systemd/system/pc-tunnel@.service"
 cp "$REPO_ROOT/mcp-hub-monitor.service" "$BUILD_DIR/lib/systemd/system/mcp-hub-monitor.service"
 
