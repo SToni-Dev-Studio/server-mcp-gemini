@@ -1726,17 +1726,34 @@ async def _admin_page(request: Request) -> HTMLResponse:
     return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body))
 
 
+_ADMIN_LOGIN_ATTEMPTS: dict[str, list[float]] = {}
+
+
 async def _admin_login(request: Request) -> RedirectResponse | HTMLResponse:
     form = await request.form()
     password = str(form.get("password", ""))
+    client_ip = request.client.host if request.client else "unknown"
+
+    # Rate limiting: max 5 failed attempts per IP within 60s
+    now = time.time()
+    attempts = [t for t in _ADMIN_LOGIN_ATTEMPTS.get(client_ip, []) if now - t < 60]
+    _ADMIN_LOGIN_ATTEMPTS[client_ip] = attempts
+    if len(attempts) >= 5:
+        body = _ADMIN_LOGIN_BODY.replace(
+            "__ERROR__", "<p style='color:#f85149'>Too many failed login attempts. Please wait 1 minute.</p>"
+        )
+        return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=429)
+
     if not ADMIN_PASSWORD:
         body = _ADMIN_LOGIN_BODY.replace(
             "__ERROR__", "<p style='color:#f85149'>ADMIN_PASSWORD is not set — admin login is disabled.</p>"
         )
         return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=503)
     if not hmac.compare_digest(password, ADMIN_PASSWORD):
+        _ADMIN_LOGIN_ATTEMPTS.setdefault(client_ip, []).append(now)
         body = _ADMIN_LOGIN_BODY.replace("__ERROR__", "<p style='color:#f85149'>Wrong password.</p>")
         return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=401)
+    _ADMIN_LOGIN_ATTEMPTS.pop(client_ip, None)
     resp = RedirectResponse(url="/admin", status_code=303)
     resp.set_cookie(
         _ADMIN_COOKIE_NAME, _admin_make_cookie(), max_age=_ADMIN_SESSION_TTL,
