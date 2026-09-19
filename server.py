@@ -1098,16 +1098,20 @@ async def pc_read_file_preview(path: str, max_bytes: int = 4096, pc: str = "defa
 
 
 @mcp.tool()
-async def pc_list() -> str:
+async def pc_list(include_offline: bool = False) -> str:
     """
-    List all auto-detected PCs and their live status (online/offline, IP, port, version, machine_id).
+    List auto-detected PCs and their live status (online/offline, IP, port, version, machine_id).
     Queries the Linux hub's PC registry (Proposal pc-autodiscovery-v2).
+    By default, only shows currently online PCs (`include_offline=False`).
     """
     try:
-        out = await _ssh_server("curl -s http://127.0.0.1:7845/pcs 2>&1", timeout=10)
+        flag = "true" if include_offline else "false"
+        out = await _ssh_server(f"curl -s 'http://127.0.0.1:7845/pcs?include_offline={flag}' 2>&1", timeout=10)
         data = json.loads(out)
         pcs = data.get("pcs", [])
         if not pcs:
+            if not include_offline:
+                return "No online PCs currently detected. (Pass `include_offline=True` to include offline PCs)."
             lines = [f"- **{name}** (configured fallback, port {cfg.get('port')})" for name, cfg in sorted(_PC_REGISTRY.items())]
             return "**Registered PCs:**\n" + "\n".join(lines)
         lines = []

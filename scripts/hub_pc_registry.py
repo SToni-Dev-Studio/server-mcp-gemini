@@ -74,7 +74,13 @@ async def handle_register(request: Request) -> JSONResponse:
     version = data.get("version", "")
     client_ip = request.client.host if request.client else "127.0.0.1"
 
-    prev_status = _registry.get(machine_name, {}).get("status", "unknown")
+    # Deduplicate: remove any old entry with matching machine_id or machine_name
+    to_delete = []
+    for k, v in _registry.items():
+        if (machine_id and v.get("machine_id") == machine_id) or k == machine_name:
+            to_delete.append(k)
+    for k in to_delete:
+        _registry.pop(k, None)
 
     _registry[machine_name] = {
         "machine_id": machine_id,
@@ -87,15 +93,24 @@ async def handle_register(request: Request) -> JSONResponse:
         "status": "online",
     }
     save_registry()
-
-    if prev_status != "online":
-        log_event(machine_name, "online", {"lan_ip": client_ip, "port": port})
+    log_event(machine_name, "online", {"lan_ip": client_ip, "port": port})
 
     return JSONResponse({"status": "registered", "machine_name": machine_name, "lan_ip": client_ip})
 
 
 async def handle_list_pcs(request: Request) -> JSONResponse:
-    return JSONResponse({"pcs": list(_registry.values())})
+    include_offline = request.query_params.get("include_offline", "false").lower() in ("true", "1", "yes")
+    now = time.time()
+    result = []
+    for pc in list(_registry.values()):
+        # Prune offline entries older than 24 hours
+        if pc.get("status") == "offline" and (now - pc.get("last_registered", 0) > 86400):
+            _registry.pop(pc.get("machine_name"), None)
+            continue
+        if include_offline or pc.get("status") == "online":
+            result.append(pc)
+    save_registry()
+    return JSONResponse({"pcs": result})
 
 
 async def poll_pcs_loop():
