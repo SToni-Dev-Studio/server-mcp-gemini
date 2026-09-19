@@ -168,12 +168,39 @@ mcp = FastMCP("github-codespaces", transport_security=_transport_security)
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# OAuth 2.1 State & Token Helpers
+# OAuth 2.1 State, Token Persistence & Helpers
 # ---------------------------------------------------------------------------
 
 _OAUTH_CODES: dict = {}      # code -> {client_id, redirect_uri, code_challenge, code_challenge_method, expires_at}
-_OAUTH_TOKENS: set = set()   # valid OAuth access tokens
 _OAUTH_CLIENTS: dict = {}    # client_id -> {client_secret, redirect_uris}
+_OAUTH_TOKENS_FILE = os.environ.get("OAUTH_TOKENS_FILE", "/tmp/oauth_tokens.json")
+
+
+def _load_oauth_data():
+    tokens = set()
+    refresh_tokens = {}
+    if os.path.exists(_OAUTH_TOKENS_FILE):
+        try:
+            with open(_OAUTH_TOKENS_FILE, "r") as f:
+                data = json.load(f)
+                tokens = set(data.get("tokens", []))
+                refresh_tokens = dict(data.get("refresh_tokens", {}))
+        except Exception:
+            pass
+    return tokens, refresh_tokens
+
+
+_OAUTH_TOKENS, _OAUTH_REFRESH_TOKENS = _load_oauth_data()
+
+
+def _save_oauth_data():
+    try:
+        os.makedirs(os.path.dirname(_OAUTH_TOKENS_FILE), exist_ok=True)
+        with open(_OAUTH_TOKENS_FILE + ".tmp", "w") as f:
+            json.dump({"tokens": list(_OAUTH_TOKENS), "refresh_tokens": _OAUTH_REFRESH_TOKENS}, f)
+        os.replace(_OAUTH_TOKENS_FILE + ".tmp", _OAUTH_TOKENS_FILE)
+    except Exception as e:
+        print(f"Warning: Failed to save OAuth tokens: {e}")
 
 
 def _is_valid_token(token: str) -> bool:
@@ -1907,15 +1934,20 @@ async def _oauth_token(request: Request) -> JSONResponse:
 
     grant_type = data.get("grant_type", "authorization_code")
     code = data.get("code", "")
+    refresh_token = data.get("refresh_token", "")
     code_verifier = data.get("code_verifier", "")
 
     if grant_type == "refresh_token":
-        new_token = f"mcp_oauth_{secrets.token_hex(24)}"
-        _OAUTH_TOKENS.add(new_token)
+        new_access_token = f"mcp_oauth_{secrets.token_hex(24)}"
+        _OAUTH_TOKENS.add(new_access_token)
+        if refresh_token:
+            _OAUTH_REFRESH_TOKENS[refresh_token] = new_access_token
+        _save_oauth_data()
         return JSONResponse({
-            "access_token": new_token,
+            "access_token": new_access_token,
             "token_type": "Bearer",
-            "expires_in": 31536000,
+            "expires_in": 315360000,
+            "refresh_token": refresh_token or f"mcp_refresh_{secrets.token_hex(24)}",
             "scope": "mcp",
         })
 
@@ -1939,13 +1971,16 @@ async def _oauth_token(request: Request) -> JSONResponse:
                 return JSONResponse({"error": "invalid_grant", "error_description": "PKCE code_verifier check failed"}, status_code=400)
 
     access_token = f"mcp_oauth_{secrets.token_hex(24)}"
+    new_refresh_token = f"mcp_refresh_{secrets.token_hex(24)}"
     _OAUTH_TOKENS.add(access_token)
+    _OAUTH_REFRESH_TOKENS[new_refresh_token] = access_token
+    _save_oauth_data()
 
     return JSONResponse({
         "access_token": access_token,
         "token_type": "Bearer",
-        "expires_in": 31536000,
-        "refresh_token": f"mcp_refresh_{secrets.token_hex(24)}",
+        "expires_in": 315360000,
+        "refresh_token": new_refresh_token,
         "scope": "mcp",
     })
 
