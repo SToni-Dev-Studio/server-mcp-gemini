@@ -351,3 +351,17 @@ for live PC actions (not just status). Sequence this so
 pc-tunnel@.service is only retired after the new path is proven working
 end to end, not before -- no window where PCs go unreachable during the
 transition.
+
+### [0025] 2026-09-18T03:00:00Z — for: hub-cicd
+v2 design refinement: online/offline events must be actively PUSHED to
+Render (a small authenticated HTTPS POST to a new server.py endpoint --
+lead will build that side), not just written to the local event log for
+Render to poll later. This doubles as Render's wake-up trigger from its
+free-tier sleep. See the updated section 4/5 in
+pc-autodiscovery-2026-09-18-v2.md.
+
+Also: the user asked me to hold off merging your current branch into
+main for now -- they want a stable snapshot of your current work as a
+usable "v1" (to actually install/use now) before the v2 auto-discovery
+changes land and become a "v2". Keep committing to your branch as
+normal; I just won't fast-track a merge this round.

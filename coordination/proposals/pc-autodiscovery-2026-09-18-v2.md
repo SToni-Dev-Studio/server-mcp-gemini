@@ -91,16 +91,26 @@ more simply, with less to configure and less to break.
    one miss.
 4. On any online→offline or offline→online transition: append a
    timestamped line to an event log (e.g.
-   `/var/lib/hub-monitor/events.jsonl`), not just silently update a
-   status file.
+   `/var/lib/hub-monitor/events.jsonl`), AND actively push the event to
+   Render (a small authenticated POST to a new `server.py` endpoint,
+   not just something Render has to poll for). This has a second
+   purpose beyond just notifying Render promptly: the incoming request
+   itself is what wakes Render up from its free-tier sleep, so Render's
+   own cached PC list gets updated proactively instead of only when a
+   user happens to make an unrelated call while Render is already awake
+   (user-requested refinement, 2026-09-18).
 5. `server.py` (on Render), when it needs live PC status or wants to
    run something on a PC, reaches the hub the same way it already
    does — `tailscale ssh` — and either reads the cached registry/status
    file, or (for an actual action, e.g. `pc_run_command`) asks the hub
    to relay a local LAN HTTP call to the target PC and pass the result
-   back. No new channel between Render and PCs is needed; the existing
-   Render↔hub Tailscale SSH link carries everything, same as it does
-   for `server_*` tools today.
+   back. No new channel between Render and PCs is needed for actions;
+   the existing Render↔hub Tailscale SSH link carries everything, same
+   as it does for `server_*` tools today. The one new channel is the
+   event push in step 4 above — hub-to-Render, over plain HTTPS (not
+   SSH, since it's a one-way notification, not a command relay), using
+   the same MCP bearer password the hub already has no reason not to
+   hold (it already holds far more sensitive secrets than that).
 
 ### Render sleep/wake
 

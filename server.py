@@ -542,62 +542,34 @@ async def list_forwarded_ports(codespace_name: str, account: str = "auto") -> st
 # ---------------------------------------------------------------------------
 
 @mcp.tool()
-async def server_status() -> str:
-    """Get status of all services on the home Linux server (Sonarr, qBittorrent, etc.)."""
-    cmd = (
-        "systemctl is-active sonarr jackett qbittorrent "
-        "| paste - - - "
-        "| awk '{print \"sonarr:\", $1, \"| jackett:\", $2, \"| qbittorrent:\", $3}'"
-    )
-    result = await _ssh_server(cmd)
-    disk = await _ssh_server("df -h / /mnt/ssd | tail -2")
+async def server_status(disk_detail: bool = False, disk_path: str = "/", processes: bool = False) -> str:
+    """
+    Get an overview of the home Linux server: disk, RAM, and (optionally)
+    a detailed disk breakdown and/or top processes.
+
+    disk_detail=True  -- add a `du`-based largest-first breakdown of disk_path
+    disk_path          -- which path to break down when disk_detail=True (default: /)
+    processes=True     -- add top CPU/RAM consuming processes (was server_process_list)
+
+    Folds in what used to be the separate server_disk_usage and
+    server_process_list tools -- pass the flags above instead of calling
+    a different tool. The old per-service (Sonarr/qBittorrent/etc)
+    service check was removed along with that unused download-automation
+    feature entirely, not just relocated.
+    """
+    disk = await _ssh_server("df -h / /mnt/ssd 2>/dev/null | tail -2")
     ram = await _ssh_server("free -h | grep Mem")
-    return f"**Services:**\n{result}\n\n**Disk:**\n{disk}\n\n**RAM:**\n{ram}"
+    parts = [f"**Disk:**\n{disk}", f"**RAM:**\n{ram}"]
 
+    if disk_detail:
+        breakdown = await _ssh_server(f"du -h --max-depth=2 {_q(disk_path)} 2>/dev/null | sort -rh | head -30")
+        parts.append(f"**Disk breakdown of {disk_path}:**\n{breakdown}")
 
-@mcp.tool()
-async def server_download_anime(anime_name: str, sonarr_quality: str = "Any") -> str:
-    """
-    Search for and queue an anime download on the home server via Sonarr.
-    Provide the anime name and optionally a quality profile.
-    """
-    sonarr_key_cmd = "cat /var/lib/sonarr/config.xml | grep -o '<ApiKey>[^<]*</ApiKey>' | sed 's/<[^>]*>//g'"
-    api_key = (await _ssh_server(sonarr_key_cmd)).strip()
-    if not api_key:
-        return "Could not retrieve Sonarr API key from server."
+    if processes:
+        top = await _ssh_server("ps aux --sort=-%cpu | head -20")
+        parts.append(f"**Top processes:**\n{top}")
 
-    # Built as a small self-contained python3 script (base64-transferred, same
-    # convention used for the organiser bridge) instead of a hand-built curl
-    # one-liner — the previous version interpolated anime_name directly into
-    # a single-quoted shell string, so a title containing an apostrophe (e.g.
-    # "Assassin's Pride") would break out of the quoting.
-    py_source = f"""
-import urllib.request as u, urllib.parse as p, json
-term = p.quote({anime_name!r})
-url = "http://localhost:8989/api/v3/series/lookup?term=" + term + "&apikey={api_key}"
-with u.urlopen(url, timeout=15) as r:
-    data = json.load(r)
-for i, s in enumerate(data[:5]):
-    print(f"{{i}}: {{s.get('title','?')}} ({{s.get('year','?')}}) - tvdbId={{s.get('tvdbId','?')}}")
-"""
-    src_b64 = base64.b64encode(py_source.encode("utf-8")).decode("ascii")
-    results = await _ssh_server(f"echo {src_b64} | base64 -d | python3 -")
-    return f"**Sonarr search results for '{anime_name}':**\n{results}\n\nTo add one, say 'add anime [number] from this list' and I'll queue it up!"
-
-
-@mcp.tool()
-async def server_download_status() -> str:
-    """Check current download status in qBittorrent and pipeline log."""
-    downloads = await _ssh_server("ls -lh /mnt/ssd/plex/downloads/ 2>/dev/null | head -20")
-    library = await _ssh_server("ls /media/plex/anime/library/ 2>/dev/null | head -20")
-    log = await _ssh_server("tail -20 /var/log/plex-download.log 2>/dev/null")
-    return (
-        f"**Active Downloads (/mnt/ssd/plex/downloads):**\n{downloads or 'Empty'}\n\n"
-        f"**Anime Library (/media/plex/anime/library):**\n{library or 'Empty'}\n\n"
-        f"**Pipeline Log (last 20 lines):**\n{log or 'No log yet'}"
-    )
-
-
+    return "\n\n".join(parts)
 @mcp.tool()
 async def server_run_command(command: str) -> str:
     """
@@ -613,14 +585,6 @@ async def server_run_command(command: str) -> str:
         if b in command:
             return f"Blocked: '{b}' is not allowed."
     return await _ssh_server(command)
-
-
-@mcp.tool()
-async def server_pipeline_log() -> str:
-    """Get the full recent pipeline log showing download, scan, compress, and backup activity."""
-    return await _ssh_server("tail -50 /var/log/plex-download.log")
-
-
 @mcp.tool()
 async def server_list_files(path: str, recursive: bool = False) -> str:
     """
@@ -632,19 +596,6 @@ async def server_list_files(path: str, recursive: bool = False) -> str:
     else:
         cmd = f"ls -lhA {_q(path)} 2>&1 | head -100"
     return await _ssh_server(cmd)
-
-
-@mcp.tool()
-async def server_disk_usage(path: str = "/") -> str:
-    """
-    Show disk usage breakdown on the Linux server, sorted largest-first.
-    Defaults to root — pass a specific path like /mnt/ssd to drill in.
-    """
-    overview = await _ssh_server("df -h")
-    breakdown = await _ssh_server(f"du -h --max-depth=2 {_q(path)} 2>/dev/null | sort -rh | head -30")
-    return f"**Filesystem overview:**\n{overview}\n\n**Breakdown of {path}:**\n{breakdown}"
-
-
 @mcp.tool()
 async def server_read_file(path: str, tail: int = 0, head: int = 0) -> str:
     """
@@ -688,14 +639,6 @@ async def server_delete_file(path: str) -> str:
     For directories use server_run_command with rm -rf carefully.
     """
     return await _ssh_server(f"rm {_q(path)} && echo 'Deleted OK'")
-
-
-@mcp.tool()
-async def server_process_list() -> str:
-    """Show top CPU/RAM consuming processes on the Linux server."""
-    return await _ssh_server("ps aux --sort=-%cpu | head -20")
-
-
 @mcp.tool()
 async def server_service_control(service: str, action: str) -> str:
     """
