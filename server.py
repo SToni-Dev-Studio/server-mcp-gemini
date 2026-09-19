@@ -1659,64 +1659,166 @@ def _mask_secret_value(value: str) -> str:
     return "*" * (len(value) - 4) + value[-4:]
 
 
+FLY_API = "https://api.fly.io/graphql"
+FLY_API_TOKEN = os.environ.get("FLY_API_TOKEN", "").strip()
+FLY_APP_NAME = os.environ.get("FLY_APP_NAME", "server-mcp-gemini").strip()
+
+
+def _fly_headers() -> dict:
+    return {"Authorization": f"Bearer {FLY_API_TOKEN}", "Content-Type": "application/json"}
+
+
 async def _admin_api_env_get(request: Request) -> JSONResponse:
     if (denied := _require_admin(request)) is not None:
         return denied
-    if not (RENDER_API_KEY and RENDER_SERVICE_ID):
-        return JSONResponse({"error": "RENDER_API_KEY / RENDER_SERVICE_ID not configured on this deployment."})
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars", headers=_render_headers(), timeout=15)
-        r.raise_for_status()
-        items = r.json()
-        env_vars = [{"key": i["envVar"]["key"], "value": _mask_secret_value(i["envVar"]["value"])} for i in items]
-        env_vars.sort(key=lambda v: v["key"])
-        return JSONResponse({"vars": env_vars})
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+    # 1. Fly.io API support
+    if FLY_API_TOKEN and FLY_APP_NAME:
+        query = """
+        query($appName: String!) {
+          app(name: $appName) {
+            secrets {
+              name
+              digest
+            }
+          }
+        }
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    FLY_API,
+                    headers=_fly_headers(),
+                    json={"query": query, "variables": {"appName": FLY_APP_NAME}},
+                    timeout=15,
+                )
+            r.raise_for_status()
+            data = r.json()
+            secrets_list = data.get("data", {}).get("app", {}).get("secrets", [])
+            env_vars = [{"key": s["name"], "value": "********"} for s in secrets_list]
+            env_vars.sort(key=lambda v: v["key"])
+            return JSONResponse({"vars": env_vars, "platform": "fly.io"})
+        except httpx.HTTPError as e:
+            return JSONResponse({"error": f"Fly.io API error: {e}"}, status_code=502)
+
+    # 2. Render API fallback
+    if RENDER_API_KEY and RENDER_SERVICE_ID:
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.get(f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars", headers=_render_headers(), timeout=15)
+            r.raise_for_status()
+            items = r.json()
+            env_vars = [{"key": i["envVar"]["key"], "value": _mask_secret_value(i["envVar"]["value"])} for i in items]
+            env_vars.sort(key=lambda v: v["key"])
+            return JSONResponse({"vars": env_vars, "platform": "render"})
+        except httpx.HTTPError as e:
+            return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+    return JSONResponse({"error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."})
 
 
 async def _admin_api_env_set(request: Request) -> JSONResponse:
     if (denied := _require_admin(request)) is not None:
         return denied
-    if not (RENDER_API_KEY and RENDER_SERVICE_ID):
-        return JSONResponse({"error": "RENDER_API_KEY / RENDER_SERVICE_ID not configured on this deployment."}, status_code=400)
+
     body = await request.json()
     key = str(body.get("key", "")).strip()
-    value = body.get("value", "")
+    value = str(body.get("value", ""))
     if not key:
         return JSONResponse({"error": "Missing 'key'."}, status_code=400)
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.put(
-                f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars/{key}",
-                headers=_render_headers(),
-                json={"value": value},
-                timeout=15,
-            )
-        r.raise_for_status()
-        return JSONResponse({"ok": True, "note": "Saved. Click 'Trigger redeploy' for it to take effect."})
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+    # 1. Fly.io API support
+    if FLY_API_TOKEN and FLY_APP_NAME:
+        mutation = """
+        mutation($appId: String!, $secrets: [SecretInput!]!) {
+          setSecrets(input: {appId: $appId, secrets: $secrets}) {
+            app {
+              name
+            }
+          }
+        }
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    FLY_API,
+                    headers=_fly_headers(),
+                    json={
+                        "query": mutation,
+                        "variables": {
+                            "appId": FLY_APP_NAME,
+                            "secrets": [{"key": key, "value": value}],
+                        },
+                    },
+                    timeout=15,
+                )
+            r.raise_for_status()
+            return JSONResponse({"ok": True, "note": f"Saved secret '{key}' to Fly.io app '{FLY_APP_NAME}'."})
+        except httpx.HTTPError as e:
+            return JSONResponse({"error": f"Fly.io API error: {e}"}, status_code=502)
+
+    # 2. Render API fallback
+    if RENDER_API_KEY and RENDER_SERVICE_ID:
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.put(
+                    f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars/{key}",
+                    headers=_render_headers(),
+                    json={"value": value},
+                    timeout=15,
+                )
+            r.raise_for_status()
+            return JSONResponse({"ok": True, "note": "Saved. Click 'Trigger redeploy' for it to take effect."})
+        except httpx.HTTPError as e:
+            return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+    return JSONResponse({"error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."}, status_code=400)
 
 
 async def _admin_api_deploy(request: Request) -> JSONResponse:
     if (denied := _require_admin(request)) is not None:
         return denied
-    if not (RENDER_API_KEY and RENDER_SERVICE_ID):
-        return JSONResponse({"error": "RENDER_API_KEY / RENDER_SERVICE_ID not configured on this deployment."}, status_code=400)
-    try:
-        async with httpx.AsyncClient() as client:
-            r = await client.post(
-                f"{RENDER_API}/services/{RENDER_SERVICE_ID}/deploys",
-                headers=_render_headers(),
-                json={"clearCache": "do_not_clear"},
-                timeout=15,
-            )
-        r.raise_for_status()
-        return JSONResponse({"ok": True, "deploy": r.json()})
-    except httpx.HTTPError as e:
-        return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+    # 1. Fly.io API support
+    if FLY_API_TOKEN and FLY_APP_NAME:
+        mutation = """
+        mutation($appId: String!) {
+          restartApp(input: {appId: $appId}) {
+            app {
+              name
+            }
+          }
+        }
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    FLY_API,
+                    headers=_fly_headers(),
+                    json={"query": mutation, "variables": {"appId": FLY_APP_NAME}},
+                    timeout=15,
+                )
+            r.raise_for_status()
+            return JSONResponse({"ok": True, "deploy": r.json(), "note": f"Restart triggered for Fly app '{FLY_APP_NAME}'."})
+        except httpx.HTTPError as e:
+            return JSONResponse({"error": f"Fly.io API error: {e}"}, status_code=502)
+
+    # 2. Render API fallback
+    if RENDER_API_KEY and RENDER_SERVICE_ID:
+        try:
+            async with httpx.AsyncClient() as client:
+                r = await client.post(
+                    f"{RENDER_API}/services/{RENDER_SERVICE_ID}/deploys",
+                    headers=_render_headers(),
+                    json={"clearCache": "do_not_clear"},
+                    timeout=15,
+                )
+            r.raise_for_status()
+            return JSONResponse({"ok": True, "deploy": r.json()})
+        except httpx.HTTPError as e:
+            return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
+
+    return JSONResponse({"error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."}, status_code=400)
 
 
 async def _admin_api_server_run(request: Request) -> JSONResponse:
