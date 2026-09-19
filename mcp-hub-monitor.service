@@ -1,0 +1,13 @@
+[Unit]
+Description=MCP Hub Auto-Discovery Listener & Poller (Proposal v2)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/lib/mcp-hub-tools/hub-monitor.py --port 7840
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

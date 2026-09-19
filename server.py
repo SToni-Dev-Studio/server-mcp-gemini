@@ -1692,6 +1692,45 @@ async def _admin_api_diagnostics(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# Proposal v2 Event Push Endpoint
+# ---------------------------------------------------------------------------
+
+_PC_V2_DYNAMIC_REGISTRY: dict = {}
+
+
+async def _events_pc_status(request: Request) -> JSONResponse:
+    expected_token = os.environ.get("MCP_SERVER_PASSWORD") or ADMIN_PASSWORD
+    if expected_token:
+        auth_header = request.headers.get("authorization", "")
+        if not auth_header.startswith("Bearer ") or auth_header[7:] != expected_token:
+            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON"}, status_code=400)
+
+    name = data.get("machine_name") or data.get("machine_id") or "unknown"
+    event_status = data.get("event", "online")
+    _PC_V2_DYNAMIC_REGISTRY[name] = {
+        "id": data.get("machine_id"),
+        "name": name,
+        "event": event_status,
+        "lan_ip": data.get("lan_ip", ""),
+        "port": data.get("port", 0),
+        "timestamp": data.get("timestamp", ""),
+        "last_updated": time.time(),
+    }
+    if data.get("port") and event_status == "online":
+        _PC_REGISTRY[name] = {
+            "port": int(data["port"]),
+            "secret": data.get("secret", os.environ.get("ORGANISER_SECRET", "")),
+            "lan_ip": data.get("lan_ip", "127.0.0.1"),
+        }
+    return JSONResponse({"status": "received", "pc": name, "event": event_status})
+
+
+# ---------------------------------------------------------------------------
 # Server Entrypoint & Routes
 # ---------------------------------------------------------------------------
 
@@ -1713,6 +1752,7 @@ async def _root(request: Request) -> JSONResponse:
             "render_admin_configured": bool(RENDER_API_KEY),
             "server_configured": bool(SERVER_HOST),
             "pcs_configured": sorted(_PC_REGISTRY.keys()),
+            "v2_dynamic_pcs": list(_PC_V2_DYNAMIC_REGISTRY.keys()),
             "accounts": {
                 "primary": bool(os.environ.get("GITHUB_TOKEN")),
                 "secondary": bool(os.environ.get("GITHUB_TOKEN_SECONDARY")),
@@ -1736,9 +1776,11 @@ app.router.routes.insert(6, Route("/admin/api/env", _admin_api_env_set, methods=
 app.router.routes.insert(7, Route("/admin/api/deploy", _admin_api_deploy, methods=["POST"]))
 app.router.routes.insert(8, Route("/admin/api/server/run", _admin_api_server_run, methods=["POST"]))
 app.router.routes.insert(9, Route("/admin/api/diagnostics", _admin_api_diagnostics, methods=["GET"]))
+app.router.routes.insert(10, Route("/events/pc_status", _events_pc_status, methods=["POST"]))
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
