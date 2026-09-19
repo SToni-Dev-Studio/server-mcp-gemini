@@ -1475,6 +1475,47 @@ static void setup_system_tray() {
 #endif
 
 // ---------------------------------------------------------------------------
+// Hub PC Auto-registration Loop (Proposal pc-autodiscovery-v2)
+// ---------------------------------------------------------------------------
+
+static void start_registration_loop() {
+    std::thread([]() {
+        // Initial delay before first announce
+        std::this_thread::sleep_for(std::chrono::seconds(2));
+        while (true) {
+            const char* hub_env = getenv("HUB_HOST");
+            std::string hub_host = hub_env ? hub_env : "192.168.101.105";
+            std::string reg_url = "http://" + hub_host + ":7845/register";
+
+            std::shared_lock<std::shared_mutex> lk(g_config_mutex);
+            std::string name = g_machine_name;
+            std::string id = g_machine_id;
+            std::string sec = g_secret;
+            lk.unlock();
+
+            std::string body = Json::obj({
+                {"machine_id",   Json::str(id)},
+                {"machine_name", Json::str(name)},
+                {"port",         Json::num(g_port)},
+                {"secret",       Json::str(sec)},
+                {"version",      Json::str(VERSION)}
+            });
+
+#if IS_WIN
+            std::string cmd = "powershell -Command \"try { Invoke-RestMethod -Uri '" + reg_url + "' -Method Post -Body '" + Json::escape(body) + "' -ContentType 'application/json' -TimeoutSec 3 } catch {}\"";
+            int rc = 0; bool to = false;
+            run_command(cmd, "", rc, to, 1024, 5);
+#else
+            std::string cmd = "curl -s -m 5 -X POST " + reg_url + " -H 'Content-Type: application/json' -d '" + Json::escape(body) + "' >/dev/null 2>&1";
+            int rc = 0; bool to = false;
+            run_command(cmd, "", rc, to, 1024, 5);
+#endif
+            std::this_thread::sleep_for(std::chrono::minutes(2));
+        }
+    }).detach();
+}
+
+// ---------------------------------------------------------------------------
 // HTTP parsing and dispatch
 // ---------------------------------------------------------------------------
 
@@ -1710,6 +1751,7 @@ int main() {
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
     setup_system_tray();
 #endif
+    start_registration_loop();
     SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
     if (server == INVALID_SOCKET) {
         std::cerr << "Failed to create socket\n"; return 1;

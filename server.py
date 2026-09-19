@@ -1098,6 +1098,32 @@ async def pc_read_file_preview(path: str, max_bytes: int = 4096, pc: str = "defa
 
 
 @mcp.tool()
+async def pc_list() -> str:
+    """
+    List all auto-detected PCs and their live status (online/offline, IP, port, version, machine_id).
+    Queries the Linux hub's PC registry (Proposal pc-autodiscovery-v2).
+    """
+    try:
+        out = await _ssh_server("curl -s http://127.0.0.1:7845/pcs 2>&1", timeout=10)
+        data = json.loads(out)
+        pcs = data.get("pcs", [])
+        if not pcs:
+            lines = [f"- **{name}** (configured fallback, port {cfg.get('port')})" for name, cfg in sorted(_PC_REGISTRY.items())]
+            return "**Registered PCs:**\n" + "\n".join(lines)
+        lines = []
+        for pc in pcs:
+            status_icon = "🟢" if pc.get("status") == "online" else "🔴"
+            lines.append(
+                f"{status_icon} **{pc.get('machine_name')}** ({pc.get('machine_id', '?')}) — "
+                f"IP: {pc.get('lan_ip')}:{pc.get('port')} | Status: {pc.get('status')} | Version: {pc.get('version', '?')}"
+            )
+        return "**Auto-Detected PCs:**\n" + "\n".join(lines)
+    except Exception as e:
+        lines = [f"- **{name}** (configured fallback, port {cfg.get('port')})" for name, cfg in sorted(_PC_REGISTRY.items())]
+        return f"**Configured PCs (fallback mode):**\n" + "\n".join(lines)
+
+
+@mcp.tool()
 async def pc_disk_usage(folder: str, pc: str = "default") -> str:
     """Return a breakdown of disk usage inside a folder on a PC, sorted largest-first."""
     data = await _org_get("/disk_usage", {"folder": folder}, pc=pc)
