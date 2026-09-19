@@ -210,9 +210,17 @@ def _generate_oauth_token() -> str:
     return f"mcp_oauth_{ts}_{sig}"
 
 
+def _generate_refresh_token() -> str:
+    ts = str(int(time.time()))
+    secret = os.environ.get("MCP_SERVER_PASSWORD", "gemini_mcp_secret_2026")
+    sig = hmac.new(secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return f"mcp_refresh_{ts}_{sig}"
+
+
 def _is_valid_token(token: str) -> bool:
     if not token:
         return False
+    token = token.strip('"\'')
     expected_password = os.environ.get("MCP_SERVER_PASSWORD", "").strip()
     if expected_password and hmac.compare_digest(token, expected_password):
         return True
@@ -220,8 +228,8 @@ def _is_valid_token(token: str) -> bool:
         return True
     if token in _OAUTH_TOKENS:
         return True
-    # Stateless HMAC signature validation for OAuth tokens
-    if token.startswith("mcp_oauth_"):
+    # Stateless HMAC signature validation for OAuth tokens (access & refresh)
+    if token.startswith("mcp_oauth_") or token.startswith("mcp_refresh_"):
         parts = token.split("_")
         if len(parts) >= 4:
             ts = parts[2]
@@ -243,7 +251,16 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
         if request.method == "OPTIONS":
             return await call_next(request)
         path = request.url.path
-        if path in ("/", "/healthz", "/.well-known/oauth-authorization-server") or path.startswith("/admin") or path.startswith("/oauth"):
+        if (
+            path in (
+                "/",
+                "/healthz",
+                "/.well-known/oauth-authorization-server",
+                "/.well-known/oauth-protected-resource",
+            )
+            or path.startswith("/admin")
+            or path.startswith("/oauth")
+        ):
             return await call_next(request)
 
         expected_password = os.environ.get("MCP_SERVER_PASSWORD", "").strip()
@@ -256,17 +273,43 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
                 )
             return await call_next(request)
 
-        auth_header = request.headers.get("authorization", "")
-        token = auth_header.replace("Bearer ", "").strip() if auth_header.startswith("Bearer ") else auth_header.strip()
+        # 1. Check Authorization header (case-insensitive "Bearer" prefix)
+        auth_header = request.headers.get("authorization", "").strip()
+        token = ""
+        if auth_header:
+            if auth_header.lower().startswith("bearer "):
+                token = auth_header[7:].strip()
+            else:
+                token = auth_header
+
+        # 2. Fallback to query parameters (ChatGPT, EventSource, SSE)
+        if not token:
+            token = (
+                request.query_params.get("access_token")
+                or request.query_params.get("token")
+                or request.query_params.get("auth")
+                or request.query_params.get("api_key")
+                or ""
+            ).strip()
+
+        # 3. Fallback to custom HTTP headers
+        if not token:
+            token = (
+                request.headers.get("x-access-token")
+                or request.headers.get("x-api-key")
+                or request.headers.get("x-mcp-token")
+                or ""
+            ).strip()
 
         if not _is_valid_token(token):
             host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
             base_url = f"https://{host}" if not host.startswith("http") else host
             metadata_url = f"{base_url}/.well-known/oauth-authorization-server"
+            protected_res_url = f"{base_url}/.well-known/oauth-protected-resource"
             return JSONResponse(
                 {"error": "Unauthorized: Invalid or missing bearer token."},
                 status_code=401,
-                headers={"WWW-Authenticate": f'Bearer resource_metadata="{metadata_url}"'}
+                headers={"WWW-Authenticate": f'Bearer realm="mcp", error="invalid_token", resource_metadata="{protected_res_url}"'}
             )
         return await call_next(request)
 
@@ -1916,6 +1959,17 @@ async def _oauth_metadata(request: Request) -> JSONResponse:
     })
 
 
+async def _oauth_protected_resource(request: Request) -> JSONResponse:
+    host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
+    base_url = f"https://{host}" if not host.startswith("http") else host
+    return JSONResponse({
+        "resource": base_url,
+        "authorization_servers": [base_url],
+        "scopes_supported": ["mcp"],
+        "bearer_methods_supported": ["header", "query"],
+    })
+
+
 async def _oauth_register(request: Request) -> JSONResponse:
     try:
         data = await request.json()
@@ -2060,6 +2114,7 @@ async def _oauth_token(request: Request) -> JSONResponse:
 
     if grant_type == "refresh_token":
         new_access_token = _generate_oauth_token()
+        new_refresh_token = _generate_refresh_token()
         _OAUTH_TOKENS.add(new_access_token)
         if refresh_token:
             _OAUTH_REFRESH_TOKENS[refresh_token] = new_access_token
@@ -2068,7 +2123,7 @@ async def _oauth_token(request: Request) -> JSONResponse:
             "access_token": new_access_token,
             "token_type": "Bearer",
             "expires_in": 315360000,
-            "refresh_token": refresh_token or f"mcp_refresh_{secrets.token_hex(24)}",
+            "refresh_token": new_refresh_token,
             "scope": "mcp",
         })
 
@@ -2092,7 +2147,7 @@ async def _oauth_token(request: Request) -> JSONResponse:
                 return JSONResponse({"error": "invalid_grant", "error_description": "PKCE code_verifier check failed"}, status_code=400)
 
     access_token = _generate_oauth_token()
-    new_refresh_token = f"mcp_refresh_{secrets.token_hex(24)}"
+    new_refresh_token = _generate_refresh_token()
     _OAUTH_TOKENS.add(access_token)
     _OAUTH_REFRESH_TOKENS[new_refresh_token] = access_token
     _save_oauth_data()
@@ -2154,10 +2209,11 @@ app.router.routes.insert(8, Route("/admin/api/server/run", _admin_api_server_run
 app.router.routes.insert(9, Route("/admin/api/diagnostics", _admin_api_diagnostics, methods=["GET"]))
 app.router.routes.insert(10, Route("/events/pc_status", _events_pc_status, methods=["POST"]))
 app.router.routes.insert(11, Route("/.well-known/oauth-authorization-server", _oauth_metadata, methods=["GET"]))
-app.router.routes.insert(12, Route("/oauth/register", _oauth_register, methods=["POST"]))
-app.router.routes.insert(13, Route("/oauth/authorize", _oauth_authorize_get, methods=["GET"]))
-app.router.routes.insert(14, Route("/oauth/authorize", _oauth_authorize_post, methods=["POST"]))
-app.router.routes.insert(15, Route("/oauth/token", _oauth_token, methods=["POST"]))
+app.router.routes.insert(12, Route("/.well-known/oauth-protected-resource", _oauth_protected_resource, methods=["GET"]))
+app.router.routes.insert(13, Route("/oauth/register", _oauth_register, methods=["POST"]))
+app.router.routes.insert(14, Route("/oauth/authorize", _oauth_authorize_get, methods=["GET"]))
+app.router.routes.insert(15, Route("/oauth/authorize", _oauth_authorize_post, methods=["POST"]))
+app.router.routes.insert(16, Route("/oauth/token", _oauth_token, methods=["POST"]))
 
 
 if __name__ == "__main__":
