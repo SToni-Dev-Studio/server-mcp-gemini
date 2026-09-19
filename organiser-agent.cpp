@@ -1305,6 +1305,176 @@ static Response h_admin_page(const Request&) {
 }
 
 // ---------------------------------------------------------------------------
+// Self-updater & Rollback (Proposal C1)
+// ---------------------------------------------------------------------------
+
+static Response h_update(const Request& req) {
+    std::string content_b64 = json_str(req.body, "binary_b64");
+    if (content_b64.empty()) return Response::err(400, "Missing 'binary_b64'");
+    std::vector<uint8_t> raw;
+    if (!b64_decode(content_b64, raw) || raw.empty()) {
+        return Response::err(400, "Invalid or empty base64 binary payload");
+    }
+
+    try {
+        fs::path self_path;
+#if IS_WIN
+        wchar_t wbuf[MAX_PATH];
+        GetModuleFileNameW(nullptr, wbuf, MAX_PATH);
+        self_path = wbuf;
+#else
+        self_path = fs::canonical("/proc/self/exe");
+#endif
+        fs::path dir = self_path.parent_path();
+        fs::path new_path = dir / (self_path.filename().string() + ".new");
+
+        // Write new binary
+        std::ofstream f(new_path, std::ios::binary);
+        if (!f) return Response::err(500, "Failed to write .new binary file");
+        f.write((const char*)raw.data(), (std::streamsize)raw.size());
+        f.close();
+
+#if !IS_WIN
+        fs::permissions(new_path, fs::perms::owner_all | fs::perms::group_read | fs::perms::group_exec | fs::perms::others_read | fs::perms::others_exec);
+#endif
+
+        // Rotate backups: v2 -> v3, v1 -> v2, current -> v1
+        fs::path v3 = dir / (self_path.filename().string() + ".v3.bak");
+        fs::path v2 = dir / (self_path.filename().string() + ".v2.bak");
+        fs::path v1 = dir / (self_path.filename().string() + ".v1.bak");
+
+        if (fs::exists(v2)) { try { fs::rename(v2, v3); } catch (...) {} }
+        if (fs::exists(v1)) { try { fs::rename(v1, v2); } catch (...) {} }
+        if (fs::exists(self_path)) { try { fs::copy(self_path, v1, fs::copy_options::overwrite_existing); } catch (...) {} }
+
+#if IS_WIN
+        // Create atomic swap batch script
+        fs::path bat_path = dir / "update_swap.bat";
+        std::ofstream bat(bat_path);
+        bat << "@echo off\r\n";
+        bat << "timeout /t 1 /nobreak >nul\r\n";
+        bat << "move /y \"" << new_path.string() << "\" \"" << self_path.string() << "\"\r\n";
+        bat << "start \"\" \"" << self_path.string() << "\"\r\n";
+        bat << "del \"%~f0\"\r\n";
+        bat.close();
+
+        std::string cmd = "cmd /c start /b " + bat_path.string();
+        int rc = 0; bool to = false;
+        run_command(cmd, dir.string(), rc, to);
+#else
+        fs::rename(new_path, self_path);
+#endif
+
+        return Response::ok(Json::obj({
+            {"message", Json::str("Update binary written. Performing atomic swap & restart...")},
+            {"bytes", Json::num((long long)raw.size())},
+        }));
+    } catch (std::exception& e) {
+        return Response::err(500, std::string("Update failed: ") + e.what());
+    }
+}
+
+static Response h_rollback(const Request&) {
+    try {
+        fs::path self_path;
+#if IS_WIN
+        wchar_t wbuf[MAX_PATH];
+        GetModuleFileNameW(nullptr, wbuf, MAX_PATH);
+        self_path = wbuf;
+#else
+        self_path = fs::canonical("/proc/self/exe");
+#endif
+        fs::path dir = self_path.parent_path();
+        fs::path v1 = dir / (self_path.filename().string() + ".v1.bak");
+        if (!fs::exists(v1)) return Response::err(404, "No backup (.v1.bak) found for rollback.");
+
+        fs::copy(v1, self_path, fs::copy_options::overwrite_existing);
+        return Response::ok(Json::obj({
+            {"message", Json::str("Restored from backup (.v1.bak). Please restart agent.")}
+        }));
+    } catch (std::exception& e) {
+        return Response::err(500, std::string("Rollback failed: ") + e.what());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Windows System Tray & GUI Notification (Proposal C1)
+// ---------------------------------------------------------------------------
+
+#if IS_WIN
+#define WM_TRAYICON (WM_USER + 1)
+#define ID_TRAY_OPEN_DASHBOARD 1001
+#define ID_TRAY_COPY_URL       1002
+#define ID_TRAY_STATUS         1003
+#define ID_TRAY_EXIT           1004
+
+static HWND g_hWndTray = NULL;
+static NOTIFYICONDATAW g_nid = {};
+
+static LRESULT CALLBACK TrayWndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
+    if (uMsg == WM_TRAYICON) {
+        if (lParam == WM_RBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+            POINT pt;
+            GetCursorPos(&pt);
+            HMENU hMenu = CreatePopupMenu();
+            std::wstring statusStr = L"Organiser Agent v" + std::wstring(VERSION, VERSION + strlen(VERSION)) + L" (Port " + std::to_wstring(g_port) + L")";
+            AppendMenuW(hMenu, MF_STRING | MF_DISABLED, ID_TRAY_STATUS, statusStr.c_str());
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_OPEN_DASHBOARD, L"Open Dashboard");
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_COPY_URL, L"Copy Dashboard URL");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
+            AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"Exit Agent");
+
+            SetForegroundWindow(hwnd);
+            int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, pt.x, pt.y, 0, hwnd, NULL);
+            DestroyMenu(hMenu);
+
+            if (cmd == ID_TRAY_OPEN_DASHBOARD) {
+                std::string url = "http://127.0.0.1:" + std::to_string(g_port) + "/admin";
+                ShellExecuteA(NULL, "open", url.c_str(), NULL, NULL, SW_SHOWNORMAL);
+            } else if (cmd == ID_TRAY_COPY_URL) {
+                std::string url = "http://127.0.0.1:" + std::to_string(g_port) + "/admin";
+                if (OpenClipboard(hwnd)) {
+                    EmptyClipboard();
+                    HGLOBAL hGlob = GlobalAlloc(GMEM_MOVEABLE, url.size() + 1);
+                    if (hGlob) {
+                        memcpy(GlobalLock(hGlob), url.c_str(), url.size() + 1);
+                        GlobalUnlock(hGlob);
+                        SetClipboardData(CF_TEXT, hGlob);
+                    }
+                    CloseClipboard();
+                }
+            } else if (cmd == ID_TRAY_EXIT) {
+                Shell_NotifyIconW(NIM_DELETE, &g_nid);
+                ExitProcess(0);
+            }
+        }
+    }
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+}
+
+static void setup_system_tray() {
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = TrayWndProc;
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = L"OrganiserAgentTrayClass";
+    RegisterClassW(&wc);
+
+    g_hWndTray = CreateWindowExW(0, L"OrganiserAgentTrayClass", L"OrganiserAgent", 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, GetModuleHandle(NULL), NULL);
+
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = g_hWndTray;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wcscpy_s(g_nid.szTip, L"Organiser Agent (Running)");
+
+    Shell_NotifyIconW(NIM_ADD, &g_nid);
+}
+#endif
+
+// ---------------------------------------------------------------------------
 // HTTP parsing and dispatch
 // ---------------------------------------------------------------------------
 
@@ -1531,11 +1701,14 @@ int main() {
     add_route("GET",  "/read_file_b64",h_read_file_b64);
     add_route("GET",  "/config",       h_get_config);
     add_route("POST", "/config",       h_post_config);
+    add_route("POST", "/update",       h_update);
+    add_route("POST", "/rollback",     h_rollback);
     add_route("GET",  "/admin",        h_admin_page);
 
     // Socket setup
 #if IS_WIN
     WSADATA wsa; WSAStartup(MAKEWORD(2,2), &wsa);
+    setup_system_tray();
 #endif
     SOCKET server = socket(AF_INET, SOCK_STREAM, 0);
     if (server == INVALID_SOCKET) {

@@ -34,11 +34,18 @@ jobs:
         shell: cmd
         run: cl /EHsc /O2 /std:c++17 organiser-agent.cpp /Fe:organiser-agent.exe
 
+      - name: Build Inno Setup Installer
+        uses: ASchoenfeld/inno-setup-action@v1.4.0
+        with:
+          filepath: packaging/installer.iss
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: organiser-agent-${{ github.sha }}
-          path: organiser-agent.exe
+          path: |
+            organiser-agent.exe
+            dist/*.exe
           retention-days: 30
 
       - name: Publish to rolling "latest" release
@@ -48,7 +55,8 @@ jobs:
           name: "organiser-agent (latest build)"
           body: |
             Auto-built from commit ${{ github.sha }} by the build-organiser-agent workflow.
-            Download `organiser-agent.exe` below and drop it into
-            `C:\Program Files\OrganiserAgent\` per BUILD_AND_SETUP.md.
+            Download `OrganiserAgent-Setup-v2.2.0.exe` for the Windows Installer or `organiser-agent.exe` standalone.
           prerelease: true
-          files: organiser-agent.exe
+          files: |
+            organiser-agent.exe
+            dist/OrganiserAgent-Setup-v2.2.0.exe
