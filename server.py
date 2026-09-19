@@ -465,30 +465,30 @@ async def check_account_status() -> str:
 # ---------------------------------------------------------------------------
 
 async def _ssh_server(command: str, timeout: int = 60) -> str:
-    """Run a command on the home Linux server via tailscale ssh with standard ssh fallback."""
-    # 1. Try tailscale ssh
-    ssh_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
+    """Run a command on the home Linux server via SSH with non-interactive flags."""
+    key_args = ["-i", SERVER_SSH_KEY] if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY)) else []
+    ssh_cmd = [
+        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"
+    ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
     try:
         proc = await asyncio.create_subprocess_exec(
             *ssh_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=min(timeout, 10))
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         output = (stdout.decode() + stderr.decode()).strip()
-        if proc.returncode == 0 and "Connection closed" not in output:
+        if proc.returncode == 0:
             return output or f"(exited {proc.returncode}, no output)"
     except Exception:
         pass
 
-    # 2. Fallback to standard SSH
-    key_args = ["-i", SERVER_SSH_KEY] if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY)) else []
-    fallback_cmd = [
-        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "ConnectTimeout=10"
-    ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
+    # Fallback to tailscale ssh wrapper if standard SSH returns non-zero
+    ts_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
     try:
         proc = await asyncio.create_subprocess_exec(
-            *fallback_cmd,
+            *ts_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
