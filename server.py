@@ -51,6 +51,7 @@ import os
 import shlex
 import shutil
 import time
+import urllib.parse
 
 import httpx
 from dotenv import load_dotenv
@@ -58,7 +59,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.streamable_http import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from starlette.routing import Route
 
 load_dotenv()
@@ -166,29 +167,42 @@ mcp = FastMCP("github-codespaces", transport_security=_transport_security)
 # Authentication Middleware
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# OAuth 2.1 State & Token Helpers
+# ---------------------------------------------------------------------------
+
+_OAUTH_CODES: dict = {}      # code -> {client_id, redirect_uri, code_challenge, code_challenge_method, expires_at}
+_OAUTH_TOKENS: set = set()   # valid OAuth access tokens
+_OAUTH_CLIENTS: dict = {}    # client_id -> {client_secret, redirect_uris}
+
+
+def _is_valid_token(token: str) -> bool:
+    if not token:
+        return False
+    expected_password = os.environ.get("MCP_SERVER_PASSWORD", "").strip()
+    if expected_password and hmac.compare_digest(token, expected_password):
+        return True
+    if ADMIN_PASSWORD and hmac.compare_digest(token, ADMIN_PASSWORD):
+        return True
+    return token in _OAUTH_TOKENS
+
+
 class PasswordAuthMiddleware(BaseHTTPMiddleware):
     """
-    Protects the MCP endpoint with a shared-secret bearer token, compared
-    in constant time. /admin has its own cookie-based login (see below)
-    so it's exempted here rather than double-gated.
-
-    Fail-safe behaviour: if MCP_SERVER_PASSWORD is unset AND this looks
-    like a public deployment (a host was detected for Render/Fly), every
-    non-exempt request is rejected — an unset password should not mean
-    "wide open" once this is actually reachable from the internet. Local
-    dev (`python server.py` with no host env vars) still works with no
-    password needed.
+    Protects the MCP endpoint with a shared-secret bearer token or OAuth token.
+    Exempts /, /healthz, /admin, and /oauth routes.
     """
 
     async def dispatch(self, request: Request, call_next):
         if request.method == "OPTIONS":
             return await call_next(request)
-        if request.url.path in ("/", "/healthz") or request.url.path.startswith("/admin"):
+        path = request.url.path
+        if path in ("/", "/healthz", "/.well-known/oauth-authorization-server") or path.startswith("/admin") or path.startswith("/oauth"):
             return await call_next(request)
 
         expected_password = os.environ.get("MCP_SERVER_PASSWORD", "").strip()
 
-        if not expected_password:
+        if not expected_password and not _OAUTH_TOKENS:
             if _is_public_deployment:
                 return JSONResponse(
                     {"error": "Server misconfigured: MCP_SERVER_PASSWORD is not set on a public deployment."},
@@ -199,12 +213,17 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
         auth_header = request.headers.get("authorization", "")
         token = auth_header.replace("Bearer ", "").strip() if auth_header.startswith("Bearer ") else auth_header.strip()
 
-        if not hmac.compare_digest(token, expected_password):
+        if not _is_valid_token(token):
+            host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
+            base_url = f"https://{host}" if not host.startswith("http") else host
+            metadata_url = f"{base_url}/.well-known/oauth-authorization-server"
             return JSONResponse(
-                {"error": "Unauthorized: Invalid or missing server password."},
+                {"error": "Unauthorized: Invalid or missing bearer token."},
                 status_code=401,
+                headers={"WWW-Authenticate": f'Bearer resource_metadata="{metadata_url}"'}
             )
         return await call_next(request)
+
 
 
 # ---------------------------------------------------------------------------
@@ -1731,6 +1750,191 @@ async def _events_pc_status(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
+# OAuth 2.1 Web Authorization Flow Endpoints
+# ---------------------------------------------------------------------------
+
+async def _oauth_metadata(request: Request) -> JSONResponse:
+    host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
+    base_url = f"https://{host}" if not host.startswith("http") else host
+    return JSONResponse({
+        "issuer": base_url,
+        "authorization_endpoint": f"{base_url}/oauth/authorize",
+        "token_endpoint": f"{base_url}/oauth/token",
+        "registration_endpoint": f"{base_url}/oauth/register",
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code", "refresh_token"],
+        "code_challenge_methods_supported": ["S256", "plain"],
+        "scopes_supported": ["mcp"],
+    })
+
+
+async def _oauth_register(request: Request) -> JSONResponse:
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    client_id = f"client_{secrets.token_hex(8)}"
+    client_secret = f"secret_{secrets.token_hex(16)}"
+    redirect_uris = data.get("redirect_uris", ["https://claude.ai/api/mcp/auth_callback"])
+    _OAUTH_CLIENTS[client_id] = {
+        "client_secret": client_secret,
+        "redirect_uris": redirect_uris,
+    }
+    return JSONResponse({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uris": redirect_uris,
+        "grant_types": ["authorization_code", "refresh_token"],
+        "response_types": ["code"],
+    }, status_code=201)
+
+
+async def _oauth_authorize_get(request: Request) -> HTMLResponse:
+    params = request.query_params
+    client_id = _html.escape(params.get("client_id", ""))
+    redirect_uri = _html.escape(params.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback"))
+    state = _html.escape(params.get("state", ""))
+    code_challenge = _html.escape(params.get("code_challenge", ""))
+    code_challenge_method = _html.escape(params.get("code_challenge_method", "plain"))
+
+    error_html = ""
+    if params.get("error"):
+        error_html = '<div style="color: #ef4444; background: #451a1a; padding: 0.75rem; border-radius: 6px; margin-bottom: 1rem; border: 1px solid #7f1d1d;">Invalid password. Please try again.</div>'
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authorize Claude MCP Server</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; display: flex; justify-content: center; align-items: center; min-height: 80vh; }}
+        .card {{ background: #1e293b; border-radius: 12px; padding: 2.5rem; max-width: 450px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }}
+        h1 {{ color: #38bdf8; margin-top: 0; font-size: 1.5rem; text-align: center; }}
+        p {{ color: #94a3b8; font-size: 0.95rem; text-align: center; line-height: 1.5; }}
+        label {{ font-weight: 600; color: #cbd5e1; font-size: 0.9rem; margin-bottom: 0.5rem; display: block; }}
+        input[type="password"] {{ width: 100%; padding: 0.75rem; border-radius: 6px; border: 1px solid #475569; background: #0f172a; color: #f8fafc; font-size: 1rem; margin-bottom: 1.25rem; box-sizing: border-box; }}
+        input[type="password"]:focus {{ outline: none; border-color: #38bdf8; }}
+        button {{ width: 100%; background: #0284c7; color: white; border: none; padding: 0.8rem; border-radius: 6px; font-size: 1rem; font-weight: 600; cursor: pointer; transition: background 0.2s; }}
+        button:hover {{ background: #0369a1; }}
+        .badge {{ background: #0369a1; color: #e0f2fe; font-size: 0.8rem; padding: 0.2rem 0.5rem; border-radius: 4px; font-family: monospace; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Authorize Connector</h1>
+        <p>An application <span class="badge">Claude Web</span> is requesting access to your <strong>Gemini MCP Server</strong>.</p>
+        {error_html}
+        <form method="POST" action="/oauth/authorize">
+            <input type="hidden" name="client_id" value="{client_id}">
+            <input type="hidden" name="redirect_uri" value="{redirect_uri}">
+            <input type="hidden" name="state" value="{state}">
+            <input type="hidden" name="code_challenge" value="{code_challenge}">
+            <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
+            
+            <label for="password">Enter MCP Server Password:</label>
+            <input type="password" id="password" name="password" required autofocus placeholder="Enter password...">
+            
+            <button type="submit">Authorize & Return to Claude</button>
+        </form>
+    </div>
+</body>
+</html>"""
+    return HTMLResponse(html_content)
+
+
+async def _oauth_authorize_post(request: Request) -> Response:
+    form = await request.form()
+    password = str(form.get("password", "")).strip()
+    client_id = str(form.get("client_id", ""))
+    redirect_uri = str(form.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback"))
+    state = str(form.get("state", ""))
+    code_challenge = str(form.get("code_challenge", ""))
+    code_challenge_method = str(form.get("code_challenge_method", "plain"))
+
+    expected_password = os.environ.get("MCP_SERVER_PASSWORD", "").strip()
+    is_valid = False
+    if expected_password and hmac.compare_digest(password, expected_password):
+        is_valid = True
+    elif ADMIN_PASSWORD and hmac.compare_digest(password, ADMIN_PASSWORD):
+        is_valid = True
+
+    if not is_valid:
+        params = f"?client_id={urllib.parse.quote(client_id)}&redirect_uri={urllib.parse.quote(redirect_uri)}&state={urllib.parse.quote(state)}&code_challenge={urllib.parse.quote(code_challenge)}&code_challenge_method={urllib.parse.quote(code_challenge_method)}&error=1"
+        return RedirectResponse(url=f"/oauth/authorize{params}", status_code=302)
+
+    code = f"code_{secrets.token_hex(16)}"
+    _OAUTH_CODES[code] = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "code_challenge": code_challenge,
+        "code_challenge_method": code_challenge_method,
+        "expires_at": time.time() + 600,
+    }
+
+    target = f"{redirect_uri}?code={urllib.parse.quote(code)}"
+    if state:
+        target += f"&state={urllib.parse.quote(state)}"
+    return RedirectResponse(url=target, status_code=302)
+
+
+async def _oauth_token(request: Request) -> JSONResponse:
+    content_type = request.headers.get("content-type", "")
+    if "application/json" in content_type:
+        try:
+            data = await request.json()
+        except Exception:
+            data = {}
+    else:
+        form = await request.form()
+        data = dict(form)
+
+    grant_type = data.get("grant_type", "authorization_code")
+    code = data.get("code", "")
+    code_verifier = data.get("code_verifier", "")
+
+    if grant_type == "refresh_token":
+        new_token = f"mcp_oauth_{secrets.token_hex(24)}"
+        _OAUTH_TOKENS.add(new_token)
+        return JSONResponse({
+            "access_token": new_token,
+            "token_type": "Bearer",
+            "expires_in": 31536000,
+            "scope": "mcp",
+        })
+
+    if grant_type != "authorization_code" or not code or code not in _OAUTH_CODES:
+        return JSONResponse({"error": "invalid_grant", "error_description": "Invalid or expired authorization code"}, status_code=400)
+
+    code_info = _OAUTH_CODES.pop(code)
+    if time.time() > code_info["expires_at"]:
+        return JSONResponse({"error": "invalid_grant", "error_description": "Authorization code expired"}, status_code=400)
+
+    code_challenge = code_info.get("code_challenge")
+    method = code_info.get("code_challenge_method", "plain")
+    if code_challenge and code_verifier:
+        if method == "S256":
+            hashed = hashlib.sha256(code_verifier.encode("utf-8")).digest()
+            computed = base64.urlsafe_b64encode(hashed).decode("utf-8").rstrip("=")
+            if not hmac.compare_digest(computed, code_challenge.rstrip("=")):
+                return JSONResponse({"error": "invalid_grant", "error_description": "PKCE code_verifier check failed"}, status_code=400)
+        else:
+            if not hmac.compare_digest(code_verifier, code_challenge):
+                return JSONResponse({"error": "invalid_grant", "error_description": "PKCE code_verifier check failed"}, status_code=400)
+
+    access_token = f"mcp_oauth_{secrets.token_hex(24)}"
+    _OAUTH_TOKENS.add(access_token)
+
+    return JSONResponse({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 31536000,
+        "refresh_token": f"mcp_refresh_{secrets.token_hex(24)}",
+        "scope": "mcp",
+    })
+
+
+# ---------------------------------------------------------------------------
 # Server Entrypoint & Routes
 # ---------------------------------------------------------------------------
 
@@ -1777,10 +1981,16 @@ app.router.routes.insert(7, Route("/admin/api/deploy", _admin_api_deploy, method
 app.router.routes.insert(8, Route("/admin/api/server/run", _admin_api_server_run, methods=["POST"]))
 app.router.routes.insert(9, Route("/admin/api/diagnostics", _admin_api_diagnostics, methods=["GET"]))
 app.router.routes.insert(10, Route("/events/pc_status", _events_pc_status, methods=["POST"]))
+app.router.routes.insert(11, Route("/.well-known/oauth-authorization-server", _oauth_metadata, methods=["GET"]))
+app.router.routes.insert(12, Route("/oauth/register", _oauth_register, methods=["POST"]))
+app.router.routes.insert(13, Route("/oauth/authorize", _oauth_authorize_get, methods=["GET"]))
+app.router.routes.insert(14, Route("/oauth/authorize", _oauth_authorize_post, methods=["POST"]))
+app.router.routes.insert(15, Route("/oauth/token", _oauth_token, methods=["POST"]))
 
 
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
+
 
