@@ -520,6 +520,32 @@ async def create_codespace(repo_full_name: str, branch: str = "main", machine_ty
 
 
 @mcp.tool()
+async def start_codespace(codespace_name: str, account: str = "auto") -> str:
+    """Start a stopped/shutdown codespace by name and wait for it to become Available."""
+    try:
+        data = await _gh_request_with_fallback("POST", f"/user/codespaces/{codespace_name}/start", account=account)
+        state = data.get("state", "starting")
+    except Exception as e:
+        return f"Failed to start codespace '{codespace_name}': {e}"
+
+    if state in ("Available", "Running"):
+        return f"Codespace '{codespace_name}' is now running."
+
+    # Poll for up to 30 seconds until Available
+    for _ in range(15):
+        await asyncio.sleep(2)
+        try:
+            info = await _gh_request_with_fallback("GET", f"/user/codespaces/{codespace_name}", account=account)
+            curr_state = info.get("state", "")
+            if curr_state in ("Available", "Running"):
+                return f"Codespace '{codespace_name}' started successfully and is now Available."
+        except Exception:
+            pass
+
+    return f"Start requested for '{codespace_name}'. Current state: {state}."
+
+
+@mcp.tool()
 async def stop_codespace(codespace_name: str, account: str = "auto") -> str:
     """Stop a running codespace by name."""
     await _gh_request_with_fallback("POST", f"/user/codespaces/{codespace_name}/stop", account=account)
@@ -551,7 +577,7 @@ async def set_machine_type(codespace_name: str, machine_type: str, account: str 
 
 @mcp.tool()
 async def exec_command(codespace_name: str, command: str, timeout_seconds: int = 60, account: str = "auto") -> str:
-    """Run a single shell command inside a codespace asynchronously via SSH."""
+    """Run a single shell command inside a codespace asynchronously via SSH. Auto-starts stopped codespaces if needed."""
     if not shutil.which("gh"):
         raise RuntimeError("The 'gh' CLI is not installed on this server.")
 
@@ -574,6 +600,17 @@ async def exec_command(codespace_name: str, command: str, timeout_seconds: int =
             raise TimeoutError(f"Command timed out after {timeout_seconds} seconds.")
 
     returncode, output = await _run_ssh(token)
+
+    # If execution failed due to stopped/shutdown state or missing connection, auto-start and retry
+    out_lower = output.lower()
+    is_stopped_err = any(k in out_lower for k in ("not found", "stopped", "shutdown", "failed to connect", "404", "unavailable", "offline", "connect"))
+
+    if returncode != 0 and is_stopped_err:
+        print(f"Codespace '{codespace_name}' appears to be shut down. Attempting auto-start...")
+        start_result = await start_codespace(codespace_name, account=account)
+        print(f"Auto-start result: {start_result}")
+        if "Available" in start_result or "running" in start_result:
+            returncode, output = await _run_ssh(token)
 
     if returncode != 0 and account == "auto" and used_account == "primary":
         secondary_token = os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()
