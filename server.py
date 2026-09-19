@@ -677,9 +677,31 @@ async def create_git_commit_and_push(
 @mcp.tool()
 async def list_forwarded_ports(codespace_name: str, account: str = "auto") -> str:
     """List currently forwarded network ports and dev server addresses."""
-    return await exec_command(
-        codespace_name, f"gh codespace ports -c {_q(codespace_name)}", timeout_seconds=15, account=account
+    # A3 fix: the old implementation SSHed *into* the codespace and ran
+    # `gh codespace ports -c <name>` there — which requires gh installed
+    # and authenticated inside the container (rarely true) and queries
+    # the wrong side. The correct approach is to hit the GitHub API from
+    # this server, which already has credentials.
+    data = await _gh_request_with_fallback(
+        "GET", f"/user/codespaces/{codespace_name}/ports", account=account
     )
+    ports = data.get("ports", [])
+    if not ports:
+        return f"No forwarded ports found for '{codespace_name}'."
+    lines = []
+    for p in ports:
+        label = p.get("label") or p.get("name") or ""
+        port_num = p.get("port_number", "?")
+        visibility = p.get("visibility", "?")
+        browse_url = p.get("browser_url") or p.get("preview_url") or ""
+        line = f"- Port {port_num}"
+        if label:
+            line += f" ({label})"
+        line += f"  visibility={visibility}"
+        if browse_url:
+            line += f"  url={browse_url}"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -1132,11 +1154,16 @@ async def pc__screenshot(save_path: str = "", pc: str = "default") -> str:
     size = data.get("size", "")
     if not b64:
         return data.get("error", "Screenshot failed — no image returned.")
+    # A1 fix: the C++ agent produces BMP bytes (not PNG), and the correct
+    # mime type is image/bmp. The previous code also truncated the payload
+    # to 200 base64 chars, making the image unusable. Return full data.
+    mime = data.get("format", "bmp")
+    mime_type = f"image/{mime}"
     return (
         f"Screenshot captured ({size}).\n"
         f"{'Saved to: ' + path if path else ''}\n"
         f"base64_length={len(b64)}\n"
-        f"data:image/png;base64,{b64[:200]}..."
+        f"data:{mime_type};base64,{b64}"
     )
 
 

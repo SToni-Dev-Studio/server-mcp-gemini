@@ -78,6 +78,7 @@
 #include <map>
 #include <mutex>
 #include <random>
+#include <shared_mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -211,16 +212,23 @@ static bool trash_path(const fs::path& p, std::string& err) {
         fs::path trash = fs::path(home) / ".Trash";
         try {
             fs::create_directories(trash);
+            // A6 fix: avoid silently overwriting an existing same-named file.
+            // Append _1, _2, ... until we find a free slot (matches Windows behavior).
             fs::path dest = trash / p.filename();
+            if (fs::exists(dest)) {
+                std::string stem = p.stem().string();
+                std::string ext  = p.extension().string();
+                for (int n = 1; fs::exists(dest); ++n)
+                    dest = trash / (stem + "_" + std::to_string(n) + ext);
+            }
             try {
                 fs::rename(p, dest);
                 return true;
             } catch (...) {
-                // rename() fails across filesystems (EXDEV, e.g. an external
-                // drive or a different mount). Fall back to copy-then-remove
-                // so the file still ends up in Trash instead of silently
-                // becoming an unrecoverable permanent delete.
-                fs::copy(p, dest, fs::copy_options::recursive | fs::copy_options::overwrite_existing);
+                // rename() fails across filesystems (EXDEV). Fall back to
+                // copy-then-remove — no overwrite_existing since we already
+                // picked a unique dest name above.
+                fs::copy(p, dest, fs::copy_options::recursive);
                 fs::remove_all(p);
                 return true;
             }
@@ -301,6 +309,12 @@ static std::string run_command(const std::string& cmd, const std::string& cwd,
         if (hJob) TerminateJobObject(hJob, 1);
         else TerminateProcess(pi.hProcess, 1);
         WaitForSingleObject(pi.hProcess, 2000);
+    } else {
+        // A4 fix: even on normal exit, close the job object NOW before the
+        // ReadFile drain loop. JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE then kills
+        // any grandchildren that still hold the pipe write handle — without
+        // this, ReadFile blocks forever waiting for an EOF that never comes.
+        if (hJob) { CloseHandle(hJob); hJob = nullptr; }
     }
 
     // Drain whatever the child wrote (bounded read; no PeekNamedPipe loop
@@ -702,9 +716,12 @@ static std::string get_hostname() {
 
 static fs::path g_machine_config_path;
 static std::string g_machine_id;
+// A5: g_secret/g_machine_name are read on every request thread while
+// h_post_config can write them — guard with shared_mutex.
+static std::shared_mutex g_config_mutex;
 static std::string g_machine_name;
-static std::string g_config_saved_name;   // last value saved via /config (persisted)
-static std::string g_config_saved_secret; // last value saved via /config (persisted)
+static std::string g_config_saved_name;
+static std::string g_config_saved_secret;
 
 // Deliberately reads the same three fields with the same tiny json_str
 // helper used everywhere else in this file — this is one small record,
@@ -810,6 +827,7 @@ static bool reject_if_protected(const fs::path& p, Response& out) {
 // ---------------------------------------------------------------------------
 
 static Response h_status(const Request&) {
+    std::shared_lock<std::shared_mutex> lk(g_config_mutex);
     return Response::ok(Json::obj({
         {"version",         Json::str(VERSION)},
         {"platform",        Json::str(platform_name())},
@@ -876,7 +894,9 @@ static Response h_move(const Request& req) {
     if (reject_if_protected(dst, blocked)) return blocked;
     if (!fs::exists(src)) return Response::err(404, "Source does not exist: " + src_s);
     try {
-        fs::create_directories(dst.parent_path());
+        // A8 fix: dst.parent_path() is empty for bare filenames — only call
+        // create_directories when there's actually a parent to create.
+        if (!dst.parent_path().empty()) fs::create_directories(dst.parent_path());
         try {
             fs::rename(src, dst);
         } catch (...) {
@@ -1097,7 +1117,8 @@ static Response h_write_file(const Request& req) {
             return Response::err(400, "Invalid base64 in content_b64");
         }
         try {
-            fs::create_directories(p.parent_path());
+            // A8 fix: parent_path() is empty for bare filenames; guard before calling.
+            if (!p.parent_path().empty()) fs::create_directories(p.parent_path());
             std::ofstream f(p, std::ios::binary);
             if (!f) return Response::err(500, "Cannot open file for writing");
             f.write((const char*)raw.data(), (std::streamsize)raw.size());
@@ -1109,7 +1130,8 @@ static Response h_write_file(const Request& req) {
 
     std::string content = json_str(req.body, "content");
     try {
-        fs::create_directories(p.parent_path());
+        // A8 fix: same guard for bare filenames.
+        if (!p.parent_path().empty()) fs::create_directories(p.parent_path());
         std::ofstream f(p);
         if (!f) return Response::err(500, "Cannot open file for writing");
         f << content;
@@ -1353,11 +1375,12 @@ static void handle_conn(SOCKET sock) {
     header_size = header_end + 4;
 
     {
-        // Case-insensitive-enough search: real HTTP header names are
-        // conventionally "Content-Length", but be tolerant of case since
-        // this parser doesn't do full header normalization elsewhere either.
-        size_t cl_pos = raw.find("Content-Length:");
-        if (cl_pos == std::string::npos) cl_pos = raw.find("content-length:");
+        // A7 fix: lowercase the entire header block so any casing variant
+        // (Content-Length, CONTENT-LENGTH, etc.) is matched — the old code
+        // only checked the two most common forms.
+        std::string hdr_lower = raw.substr(0, header_size);
+        std::transform(hdr_lower.begin(), hdr_lower.end(), hdr_lower.begin(), ::tolower);
+        size_t cl_pos = hdr_lower.find("content-length:");
         if (cl_pos != std::string::npos && cl_pos < header_end) {
             content_length = atoll(raw.c_str() + cl_pos + 15);
         }
