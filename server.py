@@ -1776,13 +1776,16 @@ async def _oauth_register(request: Request) -> JSONResponse:
     client_id = f"client_{secrets.token_hex(8)}"
     client_secret = f"secret_{secrets.token_hex(16)}"
     redirect_uris = data.get("redirect_uris", ["https://claude.ai/api/mcp/auth_callback"])
+    client_name = data.get("client_name") or data.get("client_name", "Client App")
     _OAUTH_CLIENTS[client_id] = {
+        "client_name": client_name,
         "client_secret": client_secret,
         "redirect_uris": redirect_uris,
     }
     return JSONResponse({
         "client_id": client_id,
         "client_secret": client_secret,
+        "client_name": client_name,
         "redirect_uris": redirect_uris,
         "grant_types": ["authorization_code", "refresh_token"],
         "response_types": ["code"],
@@ -1797,6 +1800,19 @@ async def _oauth_authorize_get(request: Request) -> HTMLResponse:
     code_challenge = _html.escape(params.get("code_challenge", ""))
     code_challenge_method = _html.escape(params.get("code_challenge_method", "plain"))
 
+    # Dynamically determine client display name
+    raw_client_name = params.get("client_name", "")
+    if not raw_client_name and client_id in _OAUTH_CLIENTS:
+        raw_client_name = _OAUTH_CLIENTS[client_id].get("client_name", "")
+    if not raw_client_name:
+        if "chatgpt" in redirect_uri.lower() or "openai" in redirect_uri.lower():
+            raw_client_name = "ChatGPT"
+        elif "claude" in redirect_uri.lower():
+            raw_client_name = "Claude Web"
+        else:
+            raw_client_name = client_id if client_id else "Client App"
+    client_display_name = _html.escape(raw_client_name)
+
     error_html = ""
     if params.get("error"):
         error_html = '<div style="color: #ef4444; background: #451a1a; padding: 0.75rem; border-radius: 6px; margin-bottom: 1rem; border: 1px solid #7f1d1d;">Invalid password. Please try again.</div>'
@@ -1806,7 +1822,7 @@ async def _oauth_authorize_get(request: Request) -> HTMLResponse:
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Authorize Claude MCP Server</title>
+    <title>Authorize {client_display_name} MCP Server</title>
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; display: flex; justify-content: center; align-items: center; min-height: 80vh; }}
         .card {{ background: #1e293b; border-radius: 12px; padding: 2.5rem; max-width: 450px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }}
@@ -1823,7 +1839,7 @@ async def _oauth_authorize_get(request: Request) -> HTMLResponse:
 <body>
     <div class="card">
         <h1>Authorize Connector</h1>
-        <p>An application <span class="badge">Claude Web</span> is requesting access to your <strong>Gemini MCP Server</strong>.</p>
+        <p>An application <span class="badge">{client_display_name}</span> is requesting access to your <strong>Gemini MCP Server</strong>.</p>
         {error_html}
         <form method="POST" action="/oauth/authorize">
             <input type="hidden" name="client_id" value="{client_id}">
