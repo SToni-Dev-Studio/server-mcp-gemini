@@ -1738,7 +1738,74 @@ app = mcp.streamable_http_app()
 app.add_middleware(PasswordAuthMiddleware)
 
 
-async def _root(request: Request) -> JSONResponse:
+async def _root(request: Request) -> Response:
+    accept = request.headers.get("accept", "")
+    if "text/html" in accept:
+        host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
+        mcp_url = f"https://{host}/mcp" if not host.startswith("http") else f"{host}/mcp"
+        html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gemini MCP Server — Claude Custom Connector Guide</title>
+    <style>
+        body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background: #0f172a; color: #f8fafc; margin: 0; padding: 2rem; display: flex; justify-content: center; }}
+        .card {{ background: #1e293b; border-radius: 12px; padding: 2.5rem; max-width: 600px; width: 100%; box-shadow: 0 10px 25px rgba(0,0,0,0.5); border: 1px solid #334155; }}
+        h1 {{ color: #38bdf8; margin-top: 0; font-size: 1.75rem; }}
+        p {{ color: #94a3b8; line-height: 1.6; }}
+        .step {{ background: #0f172a; padding: 1.25rem; border-radius: 8px; margin-bottom: 1.25rem; border: 1px solid #334155; }}
+        .label {{ font-weight: bold; color: #cbd5e1; font-size: 0.9rem; margin-bottom: 0.4rem; display: block; }}
+        .field {{ display: flex; align-items: center; gap: 0.5rem; background: #1e293b; padding: 0.6rem 0.8rem; border-radius: 6px; border: 1px solid #475569; font-family: monospace; font-size: 0.95rem; color: #38bdf8; word-break: break-all; }}
+        button {{ background: #0284c7; color: white; border: none; padding: 0.5rem 0.9rem; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 0.85rem; transition: background 0.2s; white-space: nowrap; }}
+        button:hover {{ background: #0369a1; }}
+        .btn-admin {{ display: inline-block; width: 100%; text-align: center; background: #3b82f6; color: white; padding: 0.8rem; border-radius: 8px; text-decoration: none; font-weight: bold; margin-top: 1rem; box-sizing: border-box; }}
+        .btn-admin:hover {{ background: #2563eb; }}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>Gemini MCP Server</h1>
+        <p>Use the credentials below to connect this MCP server directly to <strong>Claude</strong> under <em>Settings &rarr; Connectors &rarr; + Add custom connector</em>:</p>
+        
+        <div class="step">
+            <span class="label">1. Connector URL</span>
+            <div class="field">
+                <span id="url">{mcp_url}</span>
+                <button onclick="copyText('url')">Copy</button>
+            </div>
+        </div>
+
+        <div class="step">
+            <span class="label">2. Request Header Name</span>
+            <div class="field">
+                <span id="hkey">Authorization</span>
+                <button onclick="copyText('hkey')">Copy</button>
+            </div>
+        </div>
+
+        <div class="step">
+            <span class="label">3. Request Header Value</span>
+            <div class="field">
+                <span id="hval">Bearer gemini_mcp_secret_2026</span>
+                <button onclick="copyText('hval')">Copy</button>
+            </div>
+        </div>
+
+        <a href="/admin" class="btn-admin">Go to Browser Admin Dashboard (/admin)</a>
+    </div>
+
+    <script>
+        function copyText(id) {{
+            const text = document.getElementById(id).innerText;
+            navigator.clipboard.writeText(text);
+            alert("Copied to clipboard: " + text);
+        }}
+    </script>
+</body>
+</html>"""
+        return HTMLResponse(html)
+
     return JSONResponse(
         {
             "status": "ok",
