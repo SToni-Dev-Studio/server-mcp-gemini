@@ -30,9 +30,11 @@ jobs:
       - name: Set up MSVC developer environment
         uses: ilammy/msvc-dev-cmd@v1
 
-      - name: Build organiser-agent.exe
+      - name: Build organiser-agent.exe with Version Info
         shell: cmd
-        run: cl /EHsc /O2 /std:c++17 organiser-agent.cpp /Fe:organiser-agent.exe
+        run: |
+          rc.exe version.rc
+          cl /EHsc /O2 /std:c++17 organiser-agent.cpp version.res /Fe:organiser-agent.exe
 
       - name: Build Inno Setup Installer
         uses: ASchoenfeld/inno-setup-action@v1.4.0
