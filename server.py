@@ -203,6 +203,13 @@ def _save_oauth_data():
         print(f"Warning: Failed to save OAuth tokens: {e}")
 
 
+def _generate_oauth_token() -> str:
+    ts = str(int(time.time()))
+    secret = os.environ.get("MCP_SERVER_PASSWORD", "gemini_mcp_secret_2026")
+    sig = hmac.new(secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return f"mcp_oauth_{ts}_{sig}"
+
+
 def _is_valid_token(token: str) -> bool:
     if not token:
         return False
@@ -211,7 +218,19 @@ def _is_valid_token(token: str) -> bool:
         return True
     if ADMIN_PASSWORD and hmac.compare_digest(token, ADMIN_PASSWORD):
         return True
-    return token in _OAUTH_TOKENS
+    if token in _OAUTH_TOKENS:
+        return True
+    # Stateless HMAC signature validation for OAuth tokens
+    if token.startswith("mcp_oauth_"):
+        parts = token.split("_")
+        if len(parts) >= 4:
+            ts = parts[2]
+            sig = parts[3]
+            secret = os.environ.get("MCP_SERVER_PASSWORD", "gemini_mcp_secret_2026")
+            expected_sig = hmac.new(secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+            if hmac.compare_digest(sig, expected_sig):
+                return True
+    return False
 
 
 class PasswordAuthMiddleware(BaseHTTPMiddleware):
@@ -2040,7 +2059,7 @@ async def _oauth_token(request: Request) -> JSONResponse:
     code_verifier = data.get("code_verifier", "")
 
     if grant_type == "refresh_token":
-        new_access_token = f"mcp_oauth_{secrets.token_hex(24)}"
+        new_access_token = _generate_oauth_token()
         _OAUTH_TOKENS.add(new_access_token)
         if refresh_token:
             _OAUTH_REFRESH_TOKENS[refresh_token] = new_access_token
@@ -2072,7 +2091,7 @@ async def _oauth_token(request: Request) -> JSONResponse:
             if not hmac.compare_digest(code_verifier, code_challenge):
                 return JSONResponse({"error": "invalid_grant", "error_description": "PKCE code_verifier check failed"}, status_code=400)
 
-    access_token = f"mcp_oauth_{secrets.token_hex(24)}"
+    access_token = _generate_oauth_token()
     new_refresh_token = f"mcp_refresh_{secrets.token_hex(24)}"
     _OAUTH_TOKENS.add(access_token)
     _OAUTH_REFRESH_TOKENS[new_refresh_token] = access_token
