@@ -465,15 +465,13 @@ async def check_account_status() -> str:
 # ---------------------------------------------------------------------------
 
 async def _ssh_server(command: str, timeout: int = 60) -> str:
-    """Run a command on the home Linux server via SSH with non-interactive flags."""
-    key_args = ["-i", SERVER_SSH_KEY] if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY)) else []
-    ssh_cmd = [
-        "ssh", "-o", "StrictHostKeyChecking=no", "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "BatchMode=yes", "-o", "ConnectTimeout=10"
-    ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
+    """Run a command on the home Linux server via Tailscale SSH with regular SSH fallback."""
+
+    # PRIMARY: Tailscale SSH (more reliable, works across networks, encrypted)
+    ts_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
     try:
         proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd,
+            *ts_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -481,14 +479,26 @@ async def _ssh_server(command: str, timeout: int = 60) -> str:
         output = (stdout.decode() + stderr.decode()).strip()
         if proc.returncode == 0:
             return output or f"(exited {proc.returncode}, no output)"
+    except asyncio.TimeoutError:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return f"Command timed out after {timeout}s"
     except Exception:
         pass
 
-    # Fallback to tailscale ssh wrapper if standard SSH returns non-zero
-    ts_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
+    # FALLBACK: Regular SSH (if Tailscale is down)
+    key_args = ["-i", SERVER_SSH_KEY] if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY)) else []
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=10",
+    ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
     try:
         proc = await asyncio.create_subprocess_exec(
-            *ts_cmd,
+            *ssh_cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -2036,6 +2046,132 @@ async def _admin_api_diagnostics(request: Request) -> JSONResponse:
     return JSONResponse(report)
 
 
+async def _admin_api_fleet(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    pcs = []
+    # Merge static registry and dynamic discovery
+    all_names = sorted(set(list(_PC_REGISTRY.keys()) + list(_PC_V2_DYNAMIC_REGISTRY.keys())))
+    for name in all_names:
+        cfg = _PC_REGISTRY.get(name, {})
+        dyn = _PC_V2_DYNAMIC_REGISTRY.get(name, {})
+        port = cfg.get("port") or dyn.get("port")
+        lan_ip = cfg.get("lan_ip") or dyn.get("lan_ip", "127.0.0.1")
+        status = "offline"
+        details = {}
+        try:
+            res = await asyncio.wait_for(_org_get("/status", pc=name), timeout=2.0)
+            status = "online"
+            details = res
+        except Exception as e:
+            details = {"error": str(e)}
+        pcs.append({
+            "name": name,
+            "port": port,
+            "status": status,
+            "machine_name": details.get("machine_name", dyn.get("name", name)),
+            "machine_id": details.get("machine_id", dyn.get("id", "?")),
+            "version": details.get("version", "?"),
+            "platform": details.get("platform", "windows"),
+            "lan_ip": lan_ip,
+            "last_event": dyn.get("event", "unknown"),
+        })
+    return JSONResponse({"fleet": pcs})
+
+
+async def _admin_api_pc_screenshot(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    body = await request.json()
+    pc = body.get("pc", "default")
+    try:
+        res = await _org_post("/screenshot", body, pc=pc)
+        return JSONResponse(res)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def _admin_api_pc_cmd(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    body = await request.json()
+    pc = body.get("pc", "default")
+    cmd = body.get("command", "")
+    try:
+        res = await _org_post("/run_command", {"command": cmd}, pc=pc)
+        return JSONResponse(res)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def _admin_api_pc_disk(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    pc = request.query_params.get("pc", "default")
+    try:
+        res = await _org_get("/disk_usage", pc=pc)
+        return JSONResponse(res)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+async def _admin_api_codespaces(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        return JSONResponse({"codespaces": [], "error": "No GITHUB_TOKEN configured"})
+    try:
+        async with httpx.AsyncClient() as client:
+            r = await client.get(
+                f"{GITHUB_API}/user/codespaces",
+                headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+            return JSONResponse({"codespaces": data.get("codespaces", [])})
+    except Exception as e:
+        return JSONResponse({"codespaces": [], "error": str(e)})
+
+
+async def _admin_api_server_overview(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    cmd = "uptime; echo '---'; free -h; echo '---'; df -h /; echo '---'; systemctl is-active mcp-hub-monitor pc-tunnel@* 2>&1"
+    output = await _ssh_server(cmd, timeout=10)
+    return JSONResponse({"output": output})
+
+
+async def _admin_api_server_service(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    body = await request.json()
+    service = body.get("service", "")
+    action = body.get("action", "status")
+    if not service:
+        return JSONResponse({"error": "Service required"}, status_code=400)
+    cmd = f"sudo systemctl {action} {_q(service)}"
+    output = await _ssh_server(cmd, timeout=15)
+    return JSONResponse({"output": output, "service": service, "action": action})
+
+
+async def _admin_api_transfer(request: Request) -> JSONResponse:
+    if (denied := _require_admin(request)) is not None:
+        return denied
+    body = await request.json()
+    src = body.get("src")
+    dest = body.get("dest")
+    if not src or not dest:
+        return JSONResponse({"error": "Missing src or dest"}, status_code=400)
+    try:
+        data = await _location_read_bytes(src)
+        result = await _location_write_bytes(dest, data)
+        return JSONResponse({"ok": True, "result": result, "bytes": len(data)})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 # ---------------------------------------------------------------------------
 # Proposal v2 Event Push Endpoint
 # ---------------------------------------------------------------------------
@@ -2342,13 +2478,21 @@ app.router.routes.insert(6, Route("/admin/api/env", _admin_api_env_set, methods=
 app.router.routes.insert(7, Route("/admin/api/deploy", _admin_api_deploy, methods=["POST"]))
 app.router.routes.insert(8, Route("/admin/api/server/run", _admin_api_server_run, methods=["POST"]))
 app.router.routes.insert(9, Route("/admin/api/diagnostics", _admin_api_diagnostics, methods=["GET"]))
-app.router.routes.insert(10, Route("/events/pc_status", _events_pc_status, methods=["POST"]))
-app.router.routes.insert(11, Route("/.well-known/oauth-authorization-server", _oauth_metadata, methods=["GET"]))
-app.router.routes.insert(12, Route("/.well-known/oauth-protected-resource", _oauth_protected_resource, methods=["GET"]))
-app.router.routes.insert(13, Route("/oauth/register", _oauth_register, methods=["POST"]))
-app.router.routes.insert(14, Route("/oauth/authorize", _oauth_authorize_get, methods=["GET"]))
-app.router.routes.insert(15, Route("/oauth/authorize", _oauth_authorize_post, methods=["POST"]))
-app.router.routes.insert(16, Route("/oauth/token", _oauth_token, methods=["POST"]))
+app.router.routes.insert(10, Route("/admin/api/fleet", _admin_api_fleet, methods=["GET"]))
+app.router.routes.insert(11, Route("/admin/api/pc/screenshot", _admin_api_pc_screenshot, methods=["POST"]))
+app.router.routes.insert(12, Route("/admin/api/pc/cmd", _admin_api_pc_cmd, methods=["POST"]))
+app.router.routes.insert(13, Route("/admin/api/pc/disk", _admin_api_pc_disk, methods=["GET"]))
+app.router.routes.insert(14, Route("/admin/api/codespaces", _admin_api_codespaces, methods=["GET"]))
+app.router.routes.insert(15, Route("/admin/api/server/overview", _admin_api_server_overview, methods=["GET"]))
+app.router.routes.insert(16, Route("/admin/api/server/service", _admin_api_server_service, methods=["POST"]))
+app.router.routes.insert(17, Route("/admin/api/transfer", _admin_api_transfer, methods=["POST"]))
+app.router.routes.insert(18, Route("/events/pc_status", _events_pc_status, methods=["POST"]))
+app.router.routes.insert(19, Route("/.well-known/oauth-authorization-server", _oauth_metadata, methods=["GET"]))
+app.router.routes.insert(20, Route("/.well-known/oauth-protected-resource", _oauth_protected_resource, methods=["GET"]))
+app.router.routes.insert(21, Route("/oauth/register", _oauth_register, methods=["POST"]))
+app.router.routes.insert(22, Route("/oauth/authorize", _oauth_authorize_get, methods=["GET"]))
+app.router.routes.insert(23, Route("/oauth/authorize", _oauth_authorize_post, methods=["POST"]))
+app.router.routes.insert(24, Route("/oauth/token", _oauth_token, methods=["POST"]))
 
 
 if __name__ == "__main__":
