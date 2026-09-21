@@ -518,7 +518,8 @@ this API knows not to URL-encode query values.
 ```python
 _transport_security = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
-    allowed_hosts=["localhost", "127.0.0.1"] + ([_allowed_host] if _allowed_host else []),
+    allowed_hosts=["localhost", "127.0.0.1"]
+    + ([_allowed_host] if _allowed_host else []),
     allowed_origins=["*"],
 )
 ```
@@ -765,7 +766,9 @@ if (have_secret) {
 if "secret" in body:
     new_secret = str(body["secret"])
     if not SECRET and new_secret:
-        return jsonify({"error": "Cannot set the initial secret via /config over the network ..."}), 403
+        return jsonify(
+            {"error": "Cannot set the initial secret via /config over the network ..."}
+        ), 403
 ```
 
 **Verified live, both implementations, both the attack and the fix's

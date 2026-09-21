@@ -16,10 +16,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         received.append(("GET", self.path, self.headers.get("Authorization"), None))
         if self.path.endswith("/env-vars"):
-            body = json.dumps([
-                {"envVar": {"key": "MCP_SERVER_PASSWORD", "value": "supersecret"}},
-                {"envVar": {"key": "PCS", "value": "{}"}},
-            ]).encode()
+            body = json.dumps(
+                [
+                    {"envVar": {"key": "MCP_SERVER_PASSWORD", "value": "supersecret"}},
+                    {"envVar": {"key": "PCS", "value": "{}"}},
+                ]
+            ).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(body)))

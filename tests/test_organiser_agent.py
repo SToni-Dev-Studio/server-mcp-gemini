@@ -11,6 +11,7 @@ path resolution (drive letters, junctions/symlinks, UNC paths) since
 that requires an actual Windows host — flagged as unverified in the
 status file.
 """
+
 import importlib
 import importlib.util
 import json
@@ -69,17 +70,25 @@ class ProtectedPathTests(unittest.TestCase):
 
     def test_system32_is_protected(self):
         self.assertTrue(self.oa._is_protected_path(Path("C:\\Windows\\System32")))
-        self.assertTrue(self.oa._is_protected_path(Path("C:\\Windows\\System32\\drivers\\etc\\hosts")))
+        self.assertTrue(
+            self.oa._is_protected_path(
+                Path("C:\\Windows\\System32\\drivers\\etc\\hosts")
+            )
+        )
 
     def test_case_insensitive(self):
-        self.assertTrue(self.oa._is_protected_path(Path("c:\\WINDOWS\\system32\\CMD.exe")))
+        self.assertTrue(
+            self.oa._is_protected_path(Path("c:\\WINDOWS\\system32\\CMD.exe"))
+        )
 
     def test_sibling_dir_not_falsely_matched(self):
         # "C:\Windows2\foo" must NOT match "C:\Windows" (boundary check)
         self.assertFalse(self.oa._is_protected_path(Path("C:\\Windows2\\foo.txt")))
 
     def test_unrelated_path_not_protected(self):
-        self.assertFalse(self.oa._is_protected_path(Path("C:\\Users\\me\\Documents\\file.txt")))
+        self.assertFalse(
+            self.oa._is_protected_path(Path("C:\\Users\\me\\Documents\\file.txt"))
+        )
 
     @unittest.expectedFailure
     def test_path_traversal_attempt_still_caught(self):
@@ -168,15 +177,24 @@ class RunCommandTimeoutTests(unittest.TestCase):
         # to prove TimeoutExpired really fires (route uses 60s which
         # would make this test slow).
         import subprocess
+
         with self.assertRaises(subprocess.TimeoutExpired):
-            subprocess.run(["/bin/bash", "-c", "sleep 5"], timeout=1, capture_output=True, text=True)
+            subprocess.run(
+                ["/bin/bash", "-c", "sleep 5"],
+                timeout=1,
+                capture_output=True,
+                text=True,
+            )
 
     def test_malformed_input_missing_command(self):
         resp = self.client.post("/run_command", json={})
         self.assertEqual(resp.status_code, 400)
 
     def test_malformed_input_bad_working_dir(self):
-        resp = self.client.post("/run_command", json={"command": "echo hi", "working_dir": "/does/not/exist"})
+        resp = self.client.post(
+            "/run_command",
+            json={"command": "echo hi", "working_dir": "/does/not/exist"},
+        )
         self.assertEqual(resp.status_code, 400)
 
     def test_nonzero_exit_reported_not_raised(self):
@@ -202,39 +220,59 @@ class ProtectedRouteTests(unittest.TestCase):
         del os.environ["SystemRoot"]
 
     def test_move_into_protected_rejected(self):
-        resp = self.client.post("/move", json={
-            "source": "C:\\Users\\me\\file.txt",
-            "destination": "C:\\Windows\\System32\\evil.dll",
-        })
+        resp = self.client.post(
+            "/move",
+            json={
+                "source": "C:\\Users\\me\\file.txt",
+                "destination": "C:\\Windows\\System32\\evil.dll",
+            },
+        )
         self.assertEqual(resp.status_code, 403)
 
     def test_move_out_of_protected_source_rejected(self):
-        resp = self.client.post("/move", json={
-            "source": "C:\\Windows\\System32\\cmd.exe",
-            "destination": "C:\\Users\\me\\cmd_backup.exe",
-        })
+        resp = self.client.post(
+            "/move",
+            json={
+                "source": "C:\\Windows\\System32\\cmd.exe",
+                "destination": "C:\\Users\\me\\cmd_backup.exe",
+            },
+        )
         self.assertEqual(resp.status_code, 403)
 
     def test_delete_protected_rejected(self):
-        resp = self.client.post("/delete", json={"path": "C:\\Windows\\System32\\drivers\\etc\\hosts", "permanent": True})
+        resp = self.client.post(
+            "/delete",
+            json={
+                "path": "C:\\Windows\\System32\\drivers\\etc\\hosts",
+                "permanent": True,
+            },
+        )
         self.assertEqual(resp.status_code, 403)
 
     def test_write_file_into_protected_rejected(self):
-        resp = self.client.post("/write_file", json={"path": "C:\\Windows\\System32\\evil.txt", "content": "x"})
+        resp = self.client.post(
+            "/write_file",
+            json={"path": "C:\\Windows\\System32\\evil.txt", "content": "x"},
+        )
         self.assertEqual(resp.status_code, 403)
 
     def test_list_protected_rejected(self):
-        resp = self.client.get("/list", query_string={"folder": "C:\\Windows\\System32"})
+        resp = self.client.get(
+            "/list", query_string={"folder": "C:\\Windows\\System32"}
+        )
         self.assertEqual(resp.status_code, 403)
 
     def test_unrelated_move_not_blocked_by_guard(self):
         # Should get past the protected-path guard (may still 404 since
         # the Windows-style source path doesn't exist on this Linux box —
         # that's a separate, expected failure mode, not a 403).
-        resp = self.client.post("/move", json={
-            "source": "C:\\Users\\me\\file.txt",
-            "destination": "C:\\Users\\me\\file2.txt",
-        })
+        resp = self.client.post(
+            "/move",
+            json={
+                "source": "C:\\Users\\me\\file.txt",
+                "destination": "C:\\Users\\me\\file2.txt",
+            },
+        )
         self.assertNotEqual(resp.status_code, 403)
 
 
@@ -247,42 +285,57 @@ class BinarySafeFileTests(unittest.TestCase):
 
     def test_write_and_read_back_arbitrary_binary_roundtrip(self):
         import base64
+
         raw = bytes(range(256)) * 4  # includes null bytes, non-UTF8 sequences
         b64 = base64.b64encode(raw).decode()
         target = str(Path(self.tmpdir) / "blob.bin")
 
-        resp = self.client.post("/write_file", json={"path": target, "content_b64": b64})
+        resp = self.client.post(
+            "/write_file", json={"path": target, "content_b64": b64}
+        )
         self.assertEqual(resp.status_code, 200)
 
         with open(target, "rb") as f:
             on_disk = f.read()
-        self.assertEqual(on_disk, raw, "bytes written via content_b64 must be byte-identical")
+        self.assertEqual(
+            on_disk, raw, "bytes written via content_b64 must be byte-identical"
+        )
 
         resp2 = self.client.get("/read_file_b64", query_string={"path": target})
         self.assertEqual(resp2.status_code, 200)
         got = base64.b64decode(resp2.get_json()["content_b64"])
-        self.assertEqual(got, raw, "round trip through /read_file_b64 must be byte-identical")
+        self.assertEqual(
+            got, raw, "round trip through /read_file_b64 must be byte-identical"
+        )
 
     def test_write_file_text_mode_still_works_unchanged(self):
         target = str(Path(self.tmpdir) / "text.txt")
-        resp = self.client.post("/write_file", json={"path": target, "content": "hello"})
+        resp = self.client.post(
+            "/write_file", json={"path": target, "content": "hello"}
+        )
         self.assertEqual(resp.status_code, 200)
         self.assertEqual(Path(target).read_text(), "hello")
 
     def test_write_file_invalid_base64_rejected_cleanly(self):
         target = str(Path(self.tmpdir) / "bad.bin")
-        resp = self.client.post("/write_file", json={"path": target, "content_b64": "not-valid-base64!!!"})
+        resp = self.client.post(
+            "/write_file", json={"path": target, "content_b64": "not-valid-base64!!!"}
+        )
         self.assertEqual(resp.status_code, 400)
         self.assertFalse(Path(target).exists())
 
     def test_read_file_b64_nonexistent(self):
-        resp = self.client.get("/read_file_b64", query_string={"path": str(Path(self.tmpdir) / "nope.bin")})
+        resp = self.client.get(
+            "/read_file_b64", query_string={"path": str(Path(self.tmpdir) / "nope.bin")}
+        )
         self.assertEqual(resp.status_code, 404)
 
     def test_read_file_b64_respects_max_bytes_and_flags_truncation(self):
         target = Path(self.tmpdir) / "big.bin"
         target.write_bytes(b"x" * 1000)
-        resp = self.client.get("/read_file_b64", query_string={"path": str(target), "max_bytes": "100"})
+        resp = self.client.get(
+            "/read_file_b64", query_string={"path": str(target), "max_bytes": "100"}
+        )
         body = resp.get_json()
         self.assertEqual(body["returned_bytes"], 100)
         self.assertTrue(body["truncated"])
@@ -334,7 +387,11 @@ class ConfigDashboardTests(unittest.TestCase):
 
         # Attacker, holding zero credentials, tries to set the first secret.
         r2 = self.client.post("/config", json={"secret": "attacker-secret"})
-        self.assertEqual(r2.status_code, 403, "must not be able to bootstrap the first secret unauthenticated")
+        self.assertEqual(
+            r2.status_code,
+            403,
+            "must not be able to bootstrap the first secret unauthenticated",
+        )
 
         # Confirm nothing was actually persisted.
         r3 = self.client.get("/config")
@@ -356,19 +413,30 @@ class ConfigDashboardTests(unittest.TestCase):
         config_dir = self._tmp_xdg + "/organiser-agent"
         os.makedirs(config_dir, exist_ok=True)
         with open(config_dir + "/machine.json", "w") as f:
-            json.dump({"machine_id": "test-rotation", "secret": "file-bootstrapped-secret"}, f)
+            json.dump(
+                {"machine_id": "test-rotation", "secret": "file-bootstrapped-secret"}, f
+            )
         oa = _reload_agent()
         client = oa.app.test_client()
 
-        r1 = client.get("/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        r1 = client.get(
+            "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"}
+        )
         self.assertEqual(r1.status_code, 200)
 
-        r2 = client.post("/config", json={"secret": "rotated-secret"},
-                          headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        r2 = client.post(
+            "/config",
+            json={"secret": "rotated-secret"},
+            headers={"X-Organiser-Secret": "file-bootstrapped-secret"},
+        )
         self.assertEqual(r2.status_code, 200)
 
-        r3 = client.get("/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
-        self.assertEqual(r3.status_code, 401, "old secret should no longer work after rotation")
+        r3 = client.get(
+            "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"}
+        )
+        self.assertEqual(
+            r3.status_code, 401, "old secret should no longer work after rotation"
+        )
 
         r4 = client.get("/status", headers={"X-Organiser-Secret": "rotated-secret"})
         self.assertEqual(r4.status_code, 200, "new secret should work after rotation")
@@ -387,10 +455,17 @@ class ConfigDashboardTests(unittest.TestCase):
             oa = _reload_agent()
             client = oa.app.test_client()
             # Try to override via /config — env var should keep winning.
-            client.post("/config", json={"secret": "file-secret"},
-                        headers={"X-Organiser-Secret": "env-secret"})
+            client.post(
+                "/config",
+                json={"secret": "file-secret"},
+                headers={"X-Organiser-Secret": "env-secret"},
+            )
             r = client.get("/status", headers={"X-Organiser-Secret": "file-secret"})
-            self.assertEqual(r.status_code, 401, "env var secret must still win over a config-file secret")
+            self.assertEqual(
+                r.status_code,
+                401,
+                "env var secret must still win over a config-file secret",
+            )
             r2 = client.get("/status", headers={"X-Organiser-Secret": "env-secret"})
             self.assertEqual(r2.status_code, 200)
         finally:

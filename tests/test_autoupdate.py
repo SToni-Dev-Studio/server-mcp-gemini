@@ -19,6 +19,7 @@ re-run here as an automated test because doing so on every CI run would
 mutate the CI runner's real package database, which is a bigger blast
 radius than a lint/test job should have.
 """
+
 import hashlib
 import os
 import stat
@@ -34,7 +35,12 @@ import _fake_github_releases_api  # noqa: E402
 
 SCRIPT = (
     Path(__file__).parent.parent
-    / "packaging" / "mcp-hub-tools" / "usr" / "lib" / "mcp-hub-tools" / "autoupdate.sh"
+    / "packaging"
+    / "mcp-hub-tools"
+    / "usr"
+    / "lib"
+    / "mcp-hub-tools"
+    / "autoupdate.sh"
 )
 
 
@@ -111,12 +117,16 @@ def test_already_up_to_date_skips_install(fake_dpkg_bin):
 
 def test_newer_version_with_valid_checksum_installs(fake_dpkg_bin):
     deb_content = b"fake deb package bytes for testing"
-    server = _fake_github_releases_api.start(tag_name="v2.0.0", deb_content=deb_content, port=18094)
+    server = _fake_github_releases_api.start(
+        tag_name="v2.0.0", deb_content=deb_content, port=18094
+    )
     time.sleep(0.2)
     try:
         result, calls = run_autoupdate(fake_dpkg_bin, "http://127.0.0.1:18094")
         assert result.returncode == 0, result.stderr
-        assert any("dpkg -i" in c for c in calls), f"expected a dpkg -i call, got: {calls}"
+        assert any("dpkg -i" in c for c in calls), (
+            f"expected a dpkg -i call, got: {calls}"
+        )
     finally:
         server.shutdown()
 
@@ -128,7 +138,10 @@ def test_checksum_mismatch_refuses_to_install(fake_dpkg_bin):
     anyway."""
     real_content = b"the actual deb bytes"
     wrong_hash_content = b"completely different bytes"
-    assert hashlib.sha256(real_content).hexdigest() != hashlib.sha256(wrong_hash_content).hexdigest()
+    assert (
+        hashlib.sha256(real_content).hexdigest()
+        != hashlib.sha256(wrong_hash_content).hexdigest()
+    )
 
     import http.server
     import json as _json
@@ -140,13 +153,21 @@ def test_checksum_mismatch_refuses_to_install(fake_dpkg_bin):
 
         def do_GET(self):
             if self.path.endswith("/releases/latest"):
-                body = _json.dumps({
-                    "tag_name": "v2.0.0",
-                    "assets": [
-                        {"name": "mcp-hub-tools_2.0.0_all.deb", "browser_download_url": "http://127.0.0.1:18096/deb"},
-                        {"name": "mcp-hub-tools_2.0.0_all.deb.sha256", "browser_download_url": "http://127.0.0.1:18096/sum"},
-                    ],
-                }).encode()
+                body = _json.dumps(
+                    {
+                        "tag_name": "v2.0.0",
+                        "assets": [
+                            {
+                                "name": "mcp-hub-tools_2.0.0_all.deb",
+                                "browser_download_url": "http://127.0.0.1:18096/deb",
+                            },
+                            {
+                                "name": "mcp-hub-tools_2.0.0_all.deb.sha256",
+                                "browser_download_url": "http://127.0.0.1:18096/sum",
+                            },
+                        ],
+                    }
+                ).encode()
             elif self.path == "/deb":
                 body = real_content
             elif self.path == "/sum":
@@ -169,13 +190,17 @@ def test_checksum_mismatch_refuses_to_install(fake_dpkg_bin):
     try:
         result, calls = run_autoupdate(fake_dpkg_bin, "http://127.0.0.1:18096")
         assert result.returncode != 0
-        assert not any("dpkg -i" in c for c in calls), "must NOT install on checksum mismatch"
+        assert not any("dpkg -i" in c for c in calls), (
+            "must NOT install on checksum mismatch"
+        )
     finally:
         srv.shutdown()
 
 
 def test_no_deb_asset_in_release_skips_gracefully(fake_dpkg_bin):
-    server = _fake_github_releases_api.start(tag_name="v2.0.0", include_deb_asset=False, port=18097)
+    server = _fake_github_releases_api.start(
+        tag_name="v2.0.0", include_deb_asset=False, port=18097
+    )
     time.sleep(0.2)
     try:
         result, calls = run_autoupdate(fake_dpkg_bin, "http://127.0.0.1:18097")
@@ -188,5 +213,7 @@ def test_no_deb_asset_in_release_skips_gracefully(fake_dpkg_bin):
 def test_github_unreachable_fails_gracefully_not_loudly(fake_dpkg_bin):
     # Port 1: guaranteed nothing listening, connection refused quickly.
     result, calls = run_autoupdate(fake_dpkg_bin, "http://127.0.0.1:1")
-    assert result.returncode == 0, "a network blip on a periodic timer shouldn't be treated as a hard failure"
+    assert result.returncode == 0, (
+        "a network blip on a periodic timer shouldn't be treated as a hard failure"
+    )
     assert calls == []

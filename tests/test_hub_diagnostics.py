@@ -20,6 +20,7 @@ Two kinds of coverage here, and they're not the same thing:
    would have caught immediately instead of only being noticed by
    manually running the script against this sandbox).
 """
+
 import importlib.util
 import socket
 import subprocess
@@ -41,10 +42,14 @@ def fake_run(returncode=0, stdout="", stderr="", captured_cmds=None):
     passed, every cmd this is called with is appended to it, so a test
     can assert on the EXACT command built (e.g. which ssh flags were
     chosen), not just the final PASS/FAIL classification."""
+
     def _f(cmd, timeout=5):
         if captured_cmds is not None:
             captured_cmds.append(cmd)
-        return subprocess.CompletedProcess(cmd, returncode=returncode, stdout=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(
+            cmd, returncode=returncode, stdout=stdout, stderr=stderr
+        )
+
     return _f
 
 
@@ -59,16 +64,19 @@ def _assume_tools_installed(monkeypatch):
     specific NOT_CONFIGURED/"not installed" tests override this back to
     None explicitly, which is the actual thing they're testing."""
     real_which = hd.shutil.which
+
     def _which(name):
         if name in ("systemctl", "ssh", "tailscale"):
             return f"/usr/bin/{name}"
         return real_which(name)
+
     monkeypatch.setattr(hd.shutil, "which", _which)
 
 
 # ---------------------------------------------------------------------------
 # Real (unstubbed) checks
 # ---------------------------------------------------------------------------
+
 
 def test_port_listening_pass_against_a_real_local_listener():
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -110,7 +118,10 @@ def test_discover_pcs_parses_real_conf_files(tmp_path):
     (tmp_path / "desktop.conf").write_text("PC_IP=192.168.1.50\nPORT=7842\n")
     (tmp_path / "laptop.conf").write_text("PORT=7843\nPC_IP=192.168.1.51\n")
     pcs = hd.discover_pcs(tmp_path)
-    assert sorted(pcs) == [("desktop", "192.168.1.50", "7842"), ("laptop", "192.168.1.51", "7843")]
+    assert sorted(pcs) == [
+        ("desktop", "192.168.1.50", "7842"),
+        ("laptop", "192.168.1.51", "7843"),
+    ]
 
 
 def test_discover_pcs_empty_dir_returns_empty_list(tmp_path):
@@ -144,6 +155,7 @@ def test_check_pc_tunnel_config_dir_fail_on_malformed_conf(tmp_path):
 # Stubbed subprocess (`run=`) decision-logic tests
 # ---------------------------------------------------------------------------
 
+
 def test_systemd_available_pass_when_running():
     result = hd.check_systemd_available(run=fake_run(returncode=0, stdout="running\n"))
     assert result["status"] == hd.PASS
@@ -172,39 +184,52 @@ def test_systemd_available_skipped_when_unknown():
 
 def test_systemd_available_skipped_on_bus_connect_failure():
     result = hd.check_systemd_available(
-        run=fake_run(returncode=1, stdout="", stderr="Failed to connect to bus: Host is down\n")
+        run=fake_run(
+            returncode=1, stdout="", stderr="Failed to connect to bus: Host is down\n"
+        )
     )
     assert result["status"] == hd.SKIPPED
 
 
 def test_tunnel_service_pass_when_active():
-    result = hd.check_tunnel_service("desktop", run=fake_run(returncode=0, stdout="active\n"))
+    result = hd.check_tunnel_service(
+        "desktop", run=fake_run(returncode=0, stdout="active\n")
+    )
     assert result["status"] == hd.PASS
 
 
 @pytest.mark.parametrize("state", ["inactive", "failed", "activating", "deactivating"])
 def test_tunnel_service_fail_for_known_bad_states(state):
-    result = hd.check_tunnel_service("desktop", run=fake_run(returncode=3, stdout=f"{state}\n"))
+    result = hd.check_tunnel_service(
+        "desktop", run=fake_run(returncode=3, stdout=f"{state}\n")
+    )
     assert result["status"] == hd.FAIL
     assert state in result["detail"]
 
 
 def test_tunnel_service_skipped_on_unparseable_output():
     result = hd.check_tunnel_service(
-        "desktop", run=fake_run(returncode=1, stdout="", stderr="Failed to connect to bus: Host is down\n")
+        "desktop",
+        run=fake_run(
+            returncode=1, stdout="", stderr="Failed to connect to bus: Host is down\n"
+        ),
     )
     assert result["status"] == hd.SKIPPED
 
 
 def test_tailscale_pass_when_backend_running(monkeypatch):
     monkeypatch.setattr(hd.shutil, "which", lambda name: "/usr/bin/tailscale")
-    result = hd.check_tailscale(run=fake_run(returncode=0, stdout='{"BackendState": "Running"}'))
+    result = hd.check_tailscale(
+        run=fake_run(returncode=0, stdout='{"BackendState": "Running"}')
+    )
     assert result["status"] == hd.PASS
 
 
 def test_tailscale_fail_when_backend_stopped(monkeypatch):
     monkeypatch.setattr(hd.shutil, "which", lambda name: "/usr/bin/tailscale")
-    result = hd.check_tailscale(run=fake_run(returncode=0, stdout='{"BackendState": "Stopped"}'))
+    result = hd.check_tailscale(
+        run=fake_run(returncode=0, stdout='{"BackendState": "Stopped"}')
+    )
     assert result["status"] == hd.FAIL
 
 
@@ -216,18 +241,24 @@ def test_tailscale_fail_on_bad_json(monkeypatch):
 
 def test_tailscale_not_configured_when_not_installed(monkeypatch):
     monkeypatch.setattr(hd.shutil, "which", lambda name: None)
-    result = hd.check_tailscale(run=fake_run(returncode=0, stdout='{"BackendState": "Running"}'))
+    result = hd.check_tailscale(
+        run=fake_run(returncode=0, stdout='{"BackendState": "Running"}')
+    )
     assert result["status"] == hd.NOT_CONFIGURED
 
 
 def test_ssh_reachable_pass():
-    result = hd.check_ssh_reachable("desktop", "192.168.1.50", "alice", run=fake_run(returncode=0, stdout=""))
+    result = hd.check_ssh_reachable(
+        "desktop", "192.168.1.50", "alice", run=fake_run(returncode=0, stdout="")
+    )
     assert result["status"] == hd.PASS
 
 
 def test_ssh_reachable_fail():
     result = hd.check_ssh_reachable(
-        "desktop", "192.168.1.50", "alice",
+        "desktop",
+        "192.168.1.50",
+        "alice",
         run=fake_run(returncode=255, stderr="Permission denied (publickey).\n"),
     )
     assert result["status"] == hd.FAIL
@@ -248,7 +279,9 @@ def test_ssh_reachable_uses_accept_new_when_no_pinned_known_hosts(tmp_path):
     'reachable and verified against a pinned key'."""
     captured = []
     result = hd.check_ssh_reachable(
-        "desktop", "192.168.1.50", "alice",
+        "desktop",
+        "192.168.1.50",
+        "alice",
         run=fake_run(returncode=0, captured_cmds=captured),
         known_hosts_dir=tmp_path / "known_hosts.d",  # deliberately doesn't exist
     )
@@ -272,7 +305,9 @@ def test_ssh_reachable_uses_pinned_known_hosts_when_available(tmp_path):
 
     captured = []
     result = hd.check_ssh_reachable(
-        "desktop", "192.168.1.50", "alice",
+        "desktop",
+        "192.168.1.50",
+        "alice",
         run=fake_run(returncode=0, captured_cmds=captured),
         known_hosts_dir=known_hosts_dir,
     )
@@ -294,12 +329,14 @@ def test_ssh_reachable_flags_host_key_mismatch_distinctly(tmp_path):
     (known_hosts_dir / "desktop").write_text("192.168.1.50 ssh-ed25519 AAAA...\n")
 
     result = hd.check_ssh_reachable(
-        "desktop", "192.168.1.50", "alice",
+        "desktop",
+        "192.168.1.50",
+        "alice",
         run=fake_run(
             returncode=255,
             stderr="@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@\n"
-                   "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
-                   "Host key verification failed.\n",
+            "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED!\n"
+            "Host key verification failed.\n",
         ),
         known_hosts_dir=known_hosts_dir,
     )
@@ -311,6 +348,7 @@ def test_ssh_reachable_flags_host_key_mismatch_distinctly(tmp_path):
 # End-to-end: run_all() with a real temp conf dir + stubbed subprocess
 # ---------------------------------------------------------------------------
 
+
 def test_run_all_end_to_end_with_stubbed_success(tmp_path):
     (tmp_path / "desktop.conf").write_text("PC_IP=127.0.0.1\nPORT=17999\n")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -318,10 +356,14 @@ def test_run_all_end_to_end_with_stubbed_success(tmp_path):
     srv.bind(("127.0.0.1", 17999))
     srv.listen(1)
     try:
-        checks = hd.run_all(tmp_path, ssh_user="alice", run=fake_run(returncode=0, stdout="active\n"))
+        checks = hd.run_all(
+            tmp_path, ssh_user="alice", run=fake_run(returncode=0, stdout="active\n")
+        )
         by_name = {c["name"]: c for c in checks}
         assert by_name["PC tunnel config directory"]["status"] == hd.PASS
-        assert by_name["tunnel service (pc-tunnel@desktop.service)"]["status"] == hd.PASS
+        assert (
+            by_name["tunnel service (pc-tunnel@desktop.service)"]["status"] == hd.PASS
+        )
         assert by_name["port listening (desktop)"]["status"] == hd.PASS
     finally:
         srv.close()
@@ -330,12 +372,18 @@ def test_run_all_end_to_end_with_stubbed_success(tmp_path):
 def test_run_all_no_pcs_configured_is_clean_not_a_crash(tmp_path):
     checks = hd.run_all(tmp_path / "missing", ssh_user="alice", run=fake_run())
     assert any(c["status"] == hd.NOT_CONFIGURED for c in checks)
-    assert not any(c["status"] == hd.FAIL for c in checks if "PC tunnel config" in c["name"])
+    assert not any(
+        c["status"] == hd.FAIL for c in checks if "PC tunnel config" in c["name"]
+    )
 
 
 def test_main_exits_nonzero_on_failure(tmp_path, monkeypatch, capsys):
-    (tmp_path / "desktop.conf").write_text("PC_IP=127.0.0.1\nPORT=1\n")  # port 1: guaranteed not listening
-    monkeypatch.setattr(sys, "argv", ["hub-diagnostics.py", "--conf-dir", str(tmp_path), "--json"])
+    (tmp_path / "desktop.conf").write_text(
+        "PC_IP=127.0.0.1\nPORT=1\n"
+    )  # port 1: guaranteed not listening
+    monkeypatch.setattr(
+        sys, "argv", ["hub-diagnostics.py", "--conf-dir", str(tmp_path), "--json"]
+    )
     with pytest.raises(SystemExit) as exc_info:
         hd.main()
     assert exc_info.value.code == 1
@@ -354,7 +402,11 @@ def test_main_exits_zero_when_nothing_configured(tmp_path, monkeypatch):
     # test and seeing it fail with "No such file or directory: 'tailscale'"
     # instead of the NOT_CONFIGURED this test is meant to verify.
     monkeypatch.setattr(hd.shutil, "which", lambda name: None)
-    monkeypatch.setattr(sys, "argv", ["hub-diagnostics.py", "--conf-dir", str(tmp_path / "missing"), "--json"])
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["hub-diagnostics.py", "--conf-dir", str(tmp_path / "missing"), "--json"],
+    )
     with pytest.raises(SystemExit) as exc_info:
         hd.main()
     assert exc_info.value.code == 0

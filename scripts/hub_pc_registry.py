@@ -95,16 +95,24 @@ async def handle_register(request: Request) -> JSONResponse:
     save_registry()
     log_event(machine_name, "online", {"lan_ip": client_ip, "port": port})
 
-    return JSONResponse({"status": "registered", "machine_name": machine_name, "lan_ip": client_ip})
+    return JSONResponse(
+        {"status": "registered", "machine_name": machine_name, "lan_ip": client_ip}
+    )
 
 
 async def handle_list_pcs(request: Request) -> JSONResponse:
-    include_offline = request.query_params.get("include_offline", "false").lower() in ("true", "1", "yes")
+    include_offline = request.query_params.get("include_offline", "false").lower() in (
+        "true",
+        "1",
+        "yes",
+    )
     now = time.time()
     result = []
     for pc in list(_registry.values()):
         # Prune offline entries older than 24 hours
-        if pc.get("status") == "offline" and (now - pc.get("last_registered", 0) > 86400):
+        if pc.get("status") == "offline" and (
+            now - pc.get("last_registered", 0) > 86400
+        ):
             _registry.pop(pc.get("machine_name"), None)
             continue
         if include_offline or pc.get("status") == "online":
@@ -155,6 +163,7 @@ app = Starlette(
 
 if __name__ == "__main__":
     import uvicorn
+
     load_registry()
     loop = asyncio.get_event_loop()
     loop.create_task(poll_pcs_loop())

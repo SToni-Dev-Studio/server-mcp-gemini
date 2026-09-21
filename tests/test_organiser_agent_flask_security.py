@@ -8,6 +8,7 @@ Uses Flask's own test client (no real network, no real infra) with an
 isolated $HOME per test so the persisted machine.json config file never
 leaks state between tests or into whatever real $HOME this sandbox has.
 """
+
 import importlib.util
 import os
 import shutil
@@ -76,9 +77,13 @@ def test_flask_working_dir_is_never_shell_text(flask_app, tmp_path):
     client = flask_app
     marker = tmp_path / "PWNED_FLASK_WORKING_DIR"
     payload_working_dir = f"x' ; touch {marker} ; echo '"
-    r = client.post("/run_command", json={
-        "command": "echo should_not_matter", "working_dir": payload_working_dir,
-    })
+    r = client.post(
+        "/run_command",
+        json={
+            "command": "echo should_not_matter",
+            "working_dir": payload_working_dir,
+        },
+    )
     assert r.status_code == 400  # not a real directory -> clean rejection
     assert not marker.exists()
 
@@ -114,14 +119,22 @@ def test_flask_secret_comparison_fix_works_end_to_end(monkeypatch):
     spec.loader.exec_module(mod)
     client = mod.app.test_client()
 
-    assert client.get("/status", headers={"X-Organiser-Secret": "wrong"}).status_code == 401
+    assert (
+        client.get("/status", headers={"X-Organiser-Secret": "wrong"}).status_code
+        == 401
+    )
     assert client.get("/status").status_code == 401  # no header at all
-    assert client.get(
-        "/status", headers={"X-Organiser-Secret": "test-secret-end-to-end-verify"}
-    ).status_code == 200
+    assert (
+        client.get(
+            "/status", headers={"X-Organiser-Secret": "test-secret-end-to-end-verify"}
+        ).status_code
+        == 200
+    )
 
 
-def test_preview_of_binary_file_is_SILENTLY_CORRUPTED_not_a_clean_failure(flask_app, tmp_path):
+def test_preview_of_binary_file_is_SILENTLY_CORRUPTED_not_a_clean_failure(
+    flask_app, tmp_path
+):
     """NEW finding (24): unlike organiser-agent.cpp's /preview (whose
     raw-byte passthrough happens to produce invalid UTF-8 for real
     binary content, which a downstream strict-decode hop then turns
@@ -210,6 +223,7 @@ def test_flask_agent_binds_all_interfaces_not_loopback_only():
     isolated_home = tempfile.mkdtemp(prefix="flask-bind-check-")
     port = 0
     import socket
+
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
@@ -223,8 +237,11 @@ def test_flask_agent_binds_all_interfaces_not_loopback_only():
 
     proc = subprocess.Popen(
         ["python3", os.path.join(REPO_ROOT, "organiser-agent.py")],
-        cwd=REPO_ROOT, env=env,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+        cwd=REPO_ROOT,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
     )
     try:
         banner = ""
@@ -232,7 +249,12 @@ def test_flask_agent_binds_all_interfaces_not_loopback_only():
         while _time.time() < deadline:
             line = proc.stdout.readline()
             banner += line
-            if "Running on all addresses" in banner or "Running on http" in banner and "127.0.0.1" not in line and line.strip():
+            if (
+                "Running on all addresses" in banner
+                or "Running on http" in banner
+                and "127.0.0.1" not in line
+                and line.strip()
+            ):
                 pass
             if proc.poll() is not None:
                 break

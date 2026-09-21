@@ -15,6 +15,7 @@ staging environment once available, using the same _parse_location /
 _location_read_bytes / _location_write_bytes functions directly if a full
 mocked httpx/asyncssh harness isn't set up yet.
 """
+
 import os
 import sys
 import asyncio
@@ -30,13 +31,19 @@ def test_parse_location_all_kinds():
     assert srv._parse_location("sandbox:/tmp/a.txt") == ("sandbox", "", "/tmp/a.txt")
     assert srv._parse_location("server:/etc/hosts") == ("server", "", "/etc/hosts")
     assert srv._parse_location("pc:desktop:C:\\Users\\me\\file.txt") == (
-        "pc", "desktop", "C:\\Users\\me\\file.txt"
+        "pc",
+        "desktop",
+        "C:\\Users\\me\\file.txt",
     )
     assert srv._parse_location("codespace:my-space:/workspace/x") == (
-        "codespace", "my-space", "/workspace/x"
+        "codespace",
+        "my-space",
+        "/workspace/x",
     )
     assert srv._parse_location("codespace:my-space@tertiary:/workspace/x") == (
-        "codespace", "my-space@tertiary", "/workspace/x"
+        "codespace",
+        "my-space@tertiary",
+        "/workspace/x",
     )
 
 
@@ -94,7 +101,9 @@ def test_size_limit_enforced(tmp_path):
 
 def test_missing_source_gives_clean_error(tmp_path):
     result = asyncio.run(
-        srv.file_transfer(f"sandbox:{tmp_path}/does_not_exist.bin", f"sandbox:{tmp_path}/dest.bin")
+        srv.file_transfer(
+            f"sandbox:{tmp_path}/does_not_exist.bin", f"sandbox:{tmp_path}/dest.bin"
+        )
     )
     assert result.startswith("Read failed"), result
 

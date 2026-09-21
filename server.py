@@ -75,13 +75,16 @@ SERVER_SSH_KEY = os.environ.get("SERVER_SSH_KEY", "~/.ssh/id_rsa")
 # This service's own Render identity — used by the admin dashboard to manage
 # itself by default. Override RENDER_SERVICE_ID if you rename/fork the service.
 RENDER_API_KEY = os.environ.get("RENDER_API_KEY", "").strip()
-RENDER_SERVICE_ID = os.environ.get("RENDER_SERVICE_ID", "srv-da11cupt0dsc73aq2qq0").strip()
+RENDER_SERVICE_ID = os.environ.get(
+    "RENDER_SERVICE_ID", "srv-da11cupt0dsc73aq2qq0"
+).strip()
 
 # If SSH_PRIVATE_KEY env var is set (raw key text), write it to a temp file
 _SSH_PRIVATE_KEY_CONTENT = os.environ.get("SSH_PRIVATE_KEY", "")
 _SSH_KEY_PATH = os.environ.get("SSH_KEY_PATH", "/tmp/render_mcp_key")
 if _SSH_PRIVATE_KEY_CONTENT:
     import stat as _stat
+
     os.makedirs(os.path.dirname(_SSH_KEY_PATH), exist_ok=True)
     with open(_SSH_KEY_PATH, "w") as _kf:
         _kf.write(_SSH_PRIVATE_KEY_CONTENT.strip() + "\n")
@@ -112,7 +115,9 @@ if _PCS_RAW:
     try:
         _PC_REGISTRY = json.loads(_PCS_RAW)
     except json.JSONDecodeError:
-        print("WARNING: PCS env var is not valid JSON — ignoring it, falling back to single-PC mode.")
+        print(
+            "WARNING: PCS env var is not valid JSON — ignoring it, falling back to single-PC mode."
+        )
 
 if not _PC_REGISTRY:
     _PC_REGISTRY = {
@@ -133,6 +138,7 @@ def _resolve_pc(pc: str) -> dict:
 # ---------------------------------------------------------------------------
 # Host Detection & Security Settings
 # ---------------------------------------------------------------------------
+
 
 def _detect_allowed_host() -> str:
     explicit = os.environ.get("MCP_ALLOWED_HOST", "").strip()
@@ -156,7 +162,8 @@ else:
 
 _transport_security = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
-    allowed_hosts=["localhost", "127.0.0.1"] + ([_allowed_host] if _allowed_host else []),
+    allowed_hosts=["localhost", "127.0.0.1"]
+    + ([_allowed_host] if _allowed_host else []),
     allowed_origins=["*"],
 )
 
@@ -171,8 +178,8 @@ mcp = FastMCP("github-codespaces", transport_security=_transport_security)
 # OAuth 2.1 State, Token Persistence & Helpers
 # ---------------------------------------------------------------------------
 
-_OAUTH_CODES: dict = {}      # code -> {client_id, redirect_uri, code_challenge, code_challenge_method, expires_at}
-_OAUTH_CLIENTS: dict = {}    # client_id -> {client_secret, redirect_uris}
+_OAUTH_CODES: dict = {}  # code -> {client_id, redirect_uri, code_challenge, code_challenge_method, expires_at}
+_OAUTH_CLIENTS: dict = {}  # client_id -> {client_secret, redirect_uris}
 _OAUTH_TOKENS_FILE = os.environ.get("OAUTH_TOKENS_FILE", "/tmp/oauth_tokens.json")
 
 
@@ -197,7 +204,13 @@ def _save_oauth_data():
     try:
         os.makedirs(os.path.dirname(_OAUTH_TOKENS_FILE), exist_ok=True)
         with open(_OAUTH_TOKENS_FILE + ".tmp", "w") as f:
-            json.dump({"tokens": list(_OAUTH_TOKENS), "refresh_tokens": _OAUTH_REFRESH_TOKENS}, f)
+            json.dump(
+                {
+                    "tokens": list(_OAUTH_TOKENS),
+                    "refresh_tokens": _OAUTH_REFRESH_TOKENS,
+                },
+                f,
+            )
         os.replace(_OAUTH_TOKENS_FILE + ".tmp", _OAUTH_TOKENS_FILE)
     except Exception as e:
         print(f"Warning: Failed to save OAuth tokens: {e}")
@@ -206,21 +219,25 @@ def _save_oauth_data():
 def _generate_oauth_token() -> str:
     ts = str(int(time.time()))
     secret = os.environ.get("MCP_SERVER_PASSWORD", "gemini_mcp_secret_2026")
-    sig = hmac.new(secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    sig = hmac.new(
+        secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
     return f"mcp_oauth_{ts}_{sig}"
 
 
 def _generate_refresh_token() -> str:
     ts = str(int(time.time()))
     secret = os.environ.get("MCP_SERVER_PASSWORD", "gemini_mcp_secret_2026")
-    sig = hmac.new(secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    sig = hmac.new(
+        secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256
+    ).hexdigest()[:32]
     return f"mcp_refresh_{ts}_{sig}"
 
 
 def _is_valid_token(token: str) -> bool:
     if not token:
         return False
-    token = token.strip('"\'')
+    token = token.strip("\"'")
     expected_password = os.environ.get("MCP_SERVER_PASSWORD", "").strip()
     if expected_password and hmac.compare_digest(token, expected_password):
         return True
@@ -235,7 +252,9 @@ def _is_valid_token(token: str) -> bool:
             ts = parts[2]
             sig = parts[3]
             secret = os.environ.get("MCP_SERVER_PASSWORD", "gemini_mcp_secret_2026")
-            expected_sig = hmac.new(secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+            expected_sig = hmac.new(
+                secret.encode("utf-8"), ts.encode("utf-8"), hashlib.sha256
+            ).hexdigest()[:32]
             if hmac.compare_digest(sig, expected_sig):
                 return True
     return False
@@ -252,7 +271,8 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
         path = request.url.path
         if (
-            path in (
+            path
+            in (
                 "/",
                 "/healthz",
                 "/.well-known/oauth-authorization-server",
@@ -268,7 +288,9 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
         if not expected_password and not _OAUTH_TOKENS:
             if _is_public_deployment:
                 return JSONResponse(
-                    {"error": "Server misconfigured: MCP_SERVER_PASSWORD is not set on a public deployment."},
+                    {
+                        "error": "Server misconfigured: MCP_SERVER_PASSWORD is not set on a public deployment."
+                    },
                     status_code=503,
                 )
             return await call_next(request)
@@ -302,17 +324,20 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
             ).strip()
 
         if not _is_valid_token(token):
-            host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
+            host = _allowed_host or request.headers.get(
+                "host", "server-mcp-gemini.fly.dev"
+            )
             base_url = f"https://{host}" if not host.startswith("http") else host
             metadata_url = f"{base_url}/.well-known/oauth-authorization-server"
             protected_res_url = f"{base_url}/.well-known/oauth-protected-resource"
             return JSONResponse(
                 {"error": "Unauthorized: Invalid or missing bearer token."},
                 status_code=401,
-                headers={"WWW-Authenticate": f'Bearer realm="mcp", error="invalid_token", resource_metadata="{protected_res_url}"'}
+                headers={
+                    "WWW-Authenticate": f'Bearer realm="mcp", error="invalid_token", resource_metadata="{protected_res_url}"'
+                },
             )
         return await call_next(request)
-
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +351,7 @@ class PasswordAuthMiddleware(BaseHTTPMiddleware):
 # folder with an apostrophe) breaks out of the surrounding quotes and the
 # remainder gets interpreted as shell syntax — a real injection risk, not
 # just a correctness bug, since several of these run with sudo.
+
 
 def _q(value) -> str:
     """shlex.quote, coercing non-strings first (e.g. int line counts)."""
@@ -421,7 +447,9 @@ async def _gh_request_with_fallback(
         ]:
             fallback_token = os.environ.get(env_name, "").strip()
             if fallback_token and fallback_token != token:
-                print(f"Token failed with HTTP {resp.status_code}. Trying {fallback_account}...")
+                print(
+                    f"Token failed with HTTP {resp.status_code}. Trying {fallback_account}..."
+                )
                 resp = await _do(fallback_token)
                 if resp.status_code not in (401, 403):
                     break
@@ -446,16 +474,24 @@ async def check_account_status() -> str:
                 results.append(f"• **{label.capitalize()} Token**: Not configured.")
                 continue
             try:
-                resp = await client.get(f"{GITHUB_API}/user", headers=_gh_headers(token), timeout=15)
+                resp = await client.get(
+                    f"{GITHUB_API}/user", headers=_gh_headers(token), timeout=15
+                )
                 if resp.status_code == 200:
                     data = resp.json()
                     login = data.get("login", "unknown")
                     name = data.get("name") or login
-                    results.append(f"• **{label.capitalize()} Token**: ✅ Active (User: `{login}` - {name})")
+                    results.append(
+                        f"• **{label.capitalize()} Token**: ✅ Active (User: `{login}` - {name})"
+                    )
                 else:
-                    results.append(f"• **{label.capitalize()} Token**: ❌ Invalid/Expired (HTTP {resp.status_code})")
+                    results.append(
+                        f"• **{label.capitalize()} Token**: ❌ Invalid/Expired (HTTP {resp.status_code})"
+                    )
             except Exception as e:
-                results.append(f"• **{label.capitalize()} Token**: ⚠️ Network error ({type(e).__name__})")
+                results.append(
+                    f"• **{label.capitalize()} Token**: ⚠️ Network error ({type(e).__name__})"
+                )
 
     return "\n".join(results)
 
@@ -463,6 +499,7 @@ async def check_account_status() -> str:
 # ---------------------------------------------------------------------------
 # SSH Helper for Linux Server
 # ---------------------------------------------------------------------------
+
 
 async def _ssh_server(command: str, timeout: int = 60) -> str:
     """Run a command on the home Linux server via Tailscale SSH with regular SSH fallback."""
@@ -489,13 +526,24 @@ async def _ssh_server(command: str, timeout: int = 60) -> str:
         pass
 
     # FALLBACK: Regular SSH (if Tailscale is down)
-    key_args = ["-i", SERVER_SSH_KEY] if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY)) else []
-    ssh_cmd = [
-        "ssh",
-        "-o", "StrictHostKeyChecking=yes",
-        "-o", "BatchMode=yes",
-        "-o", "ConnectTimeout=10",
-    ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
+    key_args = (
+        ["-i", SERVER_SSH_KEY]
+        if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY))
+        else []
+    )
+    ssh_cmd = (
+        [
+            "ssh",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=10",
+        ]
+        + key_args
+        + [f"{SERVER_USER}@{SERVER_HOST}", command]
+    )
     try:
         proc = await asyncio.create_subprocess_exec(
             *ssh_cmd,
@@ -519,6 +567,7 @@ async def _ssh_server(command: str, timeout: int = 60) -> str:
 # Codespace Lifecycle Tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
 async def list_codespaces(account: str = "auto") -> str:
     """List caller's GitHub Codespaces: name, repo, state, and machine spec."""
@@ -533,7 +582,12 @@ async def list_codespaces(account: str = "auto") -> str:
 
 
 @mcp.tool()
-async def create_codespace(repo_full_name: str, branch: str = "main", machine_type: str = "", account: str = "auto") -> str:
+async def create_codespace(
+    repo_full_name: str,
+    branch: str = "main",
+    machine_type: str = "",
+    account: str = "auto",
+) -> str:
     """
     Create a new codespace for a given repository.
     machine_type — optional (e.g. 'standardLinux32Gb', 'premiumLinux'); left
@@ -557,7 +611,9 @@ async def create_codespace(repo_full_name: str, branch: str = "main", machine_ty
 async def start_codespace(codespace_name: str, account: str = "auto") -> str:
     """Start a stopped/shutdown codespace by name and wait for it to become Available."""
     try:
-        data = await _gh_request_with_fallback("POST", f"/user/codespaces/{codespace_name}/start", account=account)
+        data = await _gh_request_with_fallback(
+            "POST", f"/user/codespaces/{codespace_name}/start", account=account
+        )
         state = data.get("state", "starting")
     except Exception as e:
         return f"Failed to start codespace '{codespace_name}': {e}"
@@ -569,7 +625,9 @@ async def start_codespace(codespace_name: str, account: str = "auto") -> str:
     for _ in range(15):
         await asyncio.sleep(2)
         try:
-            info = await _gh_request_with_fallback("GET", f"/user/codespaces/{codespace_name}", account=account)
+            info = await _gh_request_with_fallback(
+                "GET", f"/user/codespaces/{codespace_name}", account=account
+            )
             curr_state = info.get("state", "")
             if curr_state in ("Available", "Running"):
                 return f"Codespace '{codespace_name}' started successfully and is now Available."
@@ -582,19 +640,25 @@ async def start_codespace(codespace_name: str, account: str = "auto") -> str:
 @mcp.tool()
 async def stop_codespace(codespace_name: str, account: str = "auto") -> str:
     """Stop a running codespace by name."""
-    await _gh_request_with_fallback("POST", f"/user/codespaces/{codespace_name}/stop", account=account)
+    await _gh_request_with_fallback(
+        "POST", f"/user/codespaces/{codespace_name}/stop", account=account
+    )
     return f"Stop requested for '{codespace_name}'."
 
 
 @mcp.tool()
 async def rebuild_codespace(codespace_name: str, account: str = "auto") -> str:
     """Trigger a full devcontainer rebuild inside a codespace."""
-    data = await _gh_request_with_fallback("POST", f"/user/codespaces/{codespace_name}/rebuild", account=account)
+    data = await _gh_request_with_fallback(
+        "POST", f"/user/codespaces/{codespace_name}/rebuild", account=account
+    )
     return f"Rebuild initiated for '{codespace_name}'. State: {data.get('state', 'queued')}"
 
 
 @mcp.tool()
-async def set_machine_type(codespace_name: str, machine_type: str, account: str = "auto") -> str:
+async def set_machine_type(
+    codespace_name: str, machine_type: str, account: str = "auto"
+) -> str:
     """Scale machine specs (e.g. 'standardLinux32Gb' or 'premiumLinux')."""
     await _gh_request_with_fallback(
         "PATCH",
@@ -609,8 +673,11 @@ async def set_machine_type(codespace_name: str, machine_type: str, account: str 
 # Shell Execution & File I/O Tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
-async def exec_command(codespace_name: str, command: str, timeout_seconds: int = 60, account: str = "auto") -> str:
+async def exec_command(
+    codespace_name: str, command: str, timeout_seconds: int = 60, account: str = "auto"
+) -> str:
     """Run a single shell command inside a codespace asynchronously via SSH. Auto-starts stopped codespaces if needed."""
     if not shutil.which("gh"):
         raise RuntimeError("The 'gh' CLI is not installed on this server.")
@@ -621,13 +688,21 @@ async def exec_command(codespace_name: str, command: str, timeout_seconds: int =
         env = os.environ.copy()
         env["GH_TOKEN"] = tok
         proc = await asyncio.create_subprocess_exec(
-            "gh", "codespace", "ssh", "--codespace", codespace_name, "--", command,
+            "gh",
+            "codespace",
+            "ssh",
+            "--codespace",
+            codespace_name,
+            "--",
+            command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_seconds)
+            stdout, stderr = await asyncio.wait_for(
+                proc.communicate(), timeout=timeout_seconds
+            )
             return proc.returncode, (stdout.decode() + stderr.decode()).strip()
         except asyncio.TimeoutError:
             proc.kill()
@@ -637,10 +712,24 @@ async def exec_command(codespace_name: str, command: str, timeout_seconds: int =
 
     # If execution failed due to stopped/shutdown state or missing connection, auto-start and retry
     out_lower = output.lower()
-    is_stopped_err = any(k in out_lower for k in ("not found", "stopped", "shutdown", "failed to connect", "404", "unavailable", "offline", "connect"))
+    is_stopped_err = any(
+        k in out_lower
+        for k in (
+            "not found",
+            "stopped",
+            "shutdown",
+            "failed to connect",
+            "404",
+            "unavailable",
+            "offline",
+            "connect",
+        )
+    )
 
     if returncode != 0 and is_stopped_err:
-        print(f"Codespace '{codespace_name}' appears to be shut down. Attempting auto-start...")
+        print(
+            f"Codespace '{codespace_name}' appears to be shut down. Attempting auto-start..."
+        )
         start_result = await start_codespace(codespace_name, account=account)
         print(f"Auto-start result: {start_result}")
         if "Available" in start_result or "running" in start_result:
@@ -648,7 +737,11 @@ async def exec_command(codespace_name: str, command: str, timeout_seconds: int =
 
     if returncode != 0 and account == "auto" and used_account == "primary":
         secondary_token = os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()
-        if secondary_token and ("auth" in output.lower() or "denied" in output.lower() or "billing" in output.lower()):
+        if secondary_token and (
+            "auth" in output.lower()
+            or "denied" in output.lower()
+            or "billing" in output.lower()
+        ):
             print("SSH execution failed on primary. Retrying with secondary...")
             returncode, output = await _run_ssh(secondary_token)
 
@@ -656,13 +749,19 @@ async def exec_command(codespace_name: str, command: str, timeout_seconds: int =
 
 
 @mcp.tool()
-async def read_codespace_file(codespace_name: str, file_path: str, account: str = "auto") -> str:
+async def read_codespace_file(
+    codespace_name: str, file_path: str, account: str = "auto"
+) -> str:
     """Read contents of a remote file in the codespace."""
-    return await exec_command(codespace_name, f"cat {_q(file_path)}", timeout_seconds=15, account=account)
+    return await exec_command(
+        codespace_name, f"cat {_q(file_path)}", timeout_seconds=15, account=account
+    )
 
 
 @mcp.tool()
-async def write_codespace_file(codespace_name: str, file_path: str, content: str, account: str = "auto") -> str:
+async def write_codespace_file(
+    codespace_name: str, file_path: str, content: str, account: str = "auto"
+) -> str:
     """Safely write/overwrite content to a file in the codespace using base64 encoding."""
     b64_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
     # mkdir -p the parent dir (a write to a not-yet-existing subdirectory
@@ -672,17 +771,24 @@ async def write_codespace_file(codespace_name: str, file_path: str, content: str
     # behavior -- this tool previously always said "Successfully wrote..."
     # even when the write failed).
     cmd = f"mkdir -p $(dirname {_q(file_path)}) && echo {_q(b64_content)} | base64 -d > {_q(file_path)} && echo __WRITE_OK__"
-    result = await exec_command(codespace_name, cmd, timeout_seconds=15, account=account)
+    result = await exec_command(
+        codespace_name, cmd, timeout_seconds=15, account=account
+    )
     if "__WRITE_OK__" not in result:
         return f"Write failed for '{file_path}': {result}"
     return f"Successfully wrote {len(content)} characters to '{file_path}'."
 
 
 @mcp.tool()
-async def list_workspace_files(codespace_name: str, path: str = ".", account: str = "auto") -> str:
+async def list_workspace_files(
+    codespace_name: str, path: str = ".", account: str = "auto"
+) -> str:
     """List directory contents or file tree inside the codespace."""
     return await exec_command(
-        codespace_name, f"find {_q(path)} -maxdepth 2 -not -path '*/.*'", timeout_seconds=15, account=account
+        codespace_name,
+        f"find {_q(path)} -maxdepth 2 -not -path '*/.*'",
+        timeout_seconds=15,
+        account=account,
     )
 
 
@@ -690,17 +796,27 @@ async def list_workspace_files(codespace_name: str, path: str = ".", account: st
 # Git & Port Management Tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
-async def get_git_status(codespace_name: str, repo_path: str = ".", account: str = "auto") -> str:
+async def get_git_status(
+    codespace_name: str, repo_path: str = ".", account: str = "auto"
+) -> str:
     """Get concise git status and branch info in the codespace working directory."""
     return await exec_command(
-        codespace_name, f"cd {_q(repo_path)} && git status --short -b", timeout_seconds=15, account=account
+        codespace_name,
+        f"cd {_q(repo_path)} && git status --short -b",
+        timeout_seconds=15,
+        account=account,
     )
 
 
 @mcp.tool()
 async def create_git_commit_and_push(
-    codespace_name: str, commit_message: str, repo_path: str = ".", branch: str = "", account: str = "auto"
+    codespace_name: str,
+    commit_message: str,
+    repo_path: str = ".",
+    branch: str = "",
+    account: str = "auto",
 ) -> str:
     """Stage tracked changes, commit, and push to remote."""
     push_args = f"origin {_q(branch)}" if branch else ""
@@ -742,8 +858,11 @@ async def list_forwarded_ports(codespace_name: str, account: str = "auto") -> st
 # Server Management Tools
 # ---------------------------------------------------------------------------
 
+
 @mcp.tool()
-async def server_status(disk_detail: bool = False, disk_path: str = "/", processes: bool = False) -> str:
+async def server_status(
+    disk_detail: bool = False, disk_path: str = "/", processes: bool = False
+) -> str:
     """
     Get an overview of the home Linux server: disk, RAM, and (optionally)
     a detailed disk breakdown and/or top processes.
@@ -763,7 +882,9 @@ async def server_status(disk_detail: bool = False, disk_path: str = "/", process
     parts = [f"**Disk:**\n{disk}", f"**RAM:**\n{ram}"]
 
     if disk_detail:
-        breakdown = await _ssh_server(f"du -h --max-depth=2 {_q(disk_path)} 2>/dev/null | sort -rh | head -30")
+        breakdown = await _ssh_server(
+            f"du -h --max-depth=2 {_q(disk_path)} 2>/dev/null | sort -rh | head -30"
+        )
         parts.append(f"**Disk breakdown of {disk_path}:**\n{breakdown}")
 
     if processes:
@@ -771,6 +892,8 @@ async def server_status(disk_detail: bool = False, disk_path: str = "/", process
         parts.append(f"**Top processes:**\n{top}")
 
     return "\n\n".join(parts)
+
+
 @mcp.tool()
 async def server_run_command(command: str) -> str:
     """
@@ -786,6 +909,8 @@ async def server_run_command(command: str) -> str:
         if b in command:
             return f"Blocked: '{b}' is not allowed."
     return await _ssh_server(command)
+
+
 @mcp.tool()
 async def server_list_files(path: str, recursive: bool = False) -> str:
     """
@@ -797,6 +922,8 @@ async def server_list_files(path: str, recursive: bool = False) -> str:
     else:
         cmd = f"ls -lhA {_q(path)} 2>&1 | head -100"
     return await _ssh_server(cmd)
+
+
 @mcp.tool()
 async def server_read_file(path: str, tail: int = 0, head: int = 0) -> str:
     """
@@ -840,6 +967,8 @@ async def server_delete_file(path: str) -> str:
     For directories use server_run_command with rm -rf carefully.
     """
     return await _ssh_server(f"rm {_q(path)} && echo 'Deleted OK'")
+
+
 @mcp.tool()
 async def server_service_control(service: str, action: str) -> str:
     """
@@ -865,8 +994,12 @@ async def server_tail_log(log_path: str, lines: int = 50) -> str:
 async def server_cron_list() -> str:
     """List all cron jobs on the Linux server (user + root)."""
     user_cron = await _ssh_server("crontab -l 2>/dev/null || echo '(no user crontab)'")
-    root_cron = await _ssh_server("sudo crontab -l 2>/dev/null || echo '(no root crontab)'")
-    system_cron = await _ssh_server("ls /etc/cron.d/ 2>/dev/null && cat /etc/cron.d/* 2>/dev/null | head -60")
+    root_cron = await _ssh_server(
+        "sudo crontab -l 2>/dev/null || echo '(no root crontab)'"
+    )
+    system_cron = await _ssh_server(
+        "ls /etc/cron.d/ 2>/dev/null && cat /etc/cron.d/* 2>/dev/null | head -60"
+    )
     return f"**User crontab:**\n{user_cron}\n\n**Root crontab:**\n{root_cron}\n\n**System cron.d:**\n{system_cron}"
 
 
@@ -882,8 +1015,12 @@ async def server_network_info() -> str:
 @mcp.tool()
 async def server_docker_status() -> str:
     """List Docker containers and their status on the Linux server (if Docker is installed)."""
-    containers = await _ssh_server("docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>&1")
-    images = await _ssh_server("docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}' 2>&1 | head -20")
+    containers = await _ssh_server(
+        "docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>&1"
+    )
+    images = await _ssh_server(
+        "docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}' 2>&1 | head -20"
+    )
     return f"**Containers:**\n{containers}\n\n**Images:**\n{images}"
 
 
@@ -932,9 +1069,14 @@ async def server_find_duplicates(path: str) -> str:
 # tool below takes `pc: str = "default"` to pick which machine it talks to.
 # ---------------------------------------------------------------------------
 
+
 async def _organiser_ssh_request(
-    method: str, path: str, pc: str = "default",
-    params: dict | None = None, body: dict | None = None, timeout: int = 30,
+    method: str,
+    path: str,
+    pc: str = "default",
+    params: dict | None = None,
+    body: dict | None = None,
+    timeout: int = 30,
 ) -> str:
     """
     Executes one HTTP request against a PC's organiser-agent by having the
@@ -995,7 +1137,9 @@ def _parse_organiser_response(raw: str) -> dict:
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
-        raise RuntimeError(f"Non-JSON response from organiser-agent (via server): {raw[:300]}")
+        raise RuntimeError(
+            f"Non-JSON response from organiser-agent (via server): {raw[:300]}"
+        )
 
 
 async def _org_get(path: str, params: dict | None = None, pc: str = "default") -> dict:
@@ -1077,12 +1221,16 @@ async def pc_organiser_status(pc: str = "default") -> str:
 
 
 @mcp.tool()
-async def pc_list_files(folder: str, recursive: bool = False, pc: str = "default") -> str:
+async def pc_list_files(
+    folder: str, recursive: bool = False, pc: str = "default"
+) -> str:
     """
     List files and folders inside a directory on a PC.
     Returns name, size, extension, and last-modified for each entry.
     """
-    data = await _org_get("/list", {"folder": folder, "recursive": str(recursive).lower()}, pc=pc)
+    data = await _org_get(
+        "/list", {"folder": folder, "recursive": str(recursive).lower()}, pc=pc
+    )
     entries = data.get("entries", [])
     if not entries:
         return f"No files found in '{folder}' (or path doesn't exist)."
@@ -1090,19 +1238,25 @@ async def pc_list_files(folder: str, recursive: bool = False, pc: str = "default
     for e in entries:
         kind = "DIR " if e.get("is_dir") else "FILE"
         size = e.get("size_bytes", 0)
-        lines.append(f"[{kind}] {e.get('path')} ({size:,} bytes) modified {e.get('modified','?')}")
+        lines.append(
+            f"[{kind}] {e.get('path')} ({size:,} bytes) modified {e.get('modified', '?')}"
+        )
     return "\n".join(lines)
 
 
 @mcp.tool()
 async def pc_move_file(source: str, destination: str, pc: str = "default") -> str:
     """Move (or rename) a file or folder on a PC. Parent directories are created automatically."""
-    data = await _org_post("/move", {"source": source, "destination": destination}, pc=pc)
+    data = await _org_post(
+        "/move", {"source": source, "destination": destination}, pc=pc
+    )
     return data.get("message", f"Moved '{source}' → '{destination}'")
 
 
 @mcp.tool()
-async def pc_delete_file(path: str, permanent: bool = False, pc: str = "default") -> str:
+async def pc_delete_file(
+    path: str, permanent: bool = False, pc: str = "default"
+) -> str:
     """
     Delete a file or empty folder on a PC. By default sends to the Recycle
     Bin / Trash (safe). Set permanent=True only when explicitly asked to
@@ -1116,7 +1270,9 @@ _PC_PREVIEW_MAX_BYTES_CEILING = 2_000_000  # 2 MB
 
 
 @mcp.tool()
-async def pc_read_file_preview(path: str, max_bytes: int = 4096, pc: str = "default") -> str:
+async def pc_read_file_preview(
+    path: str, max_bytes: int = 4096, pc: str = "default"
+) -> str:
     """Read the first max_bytes bytes of a text file on a PC. Useful for peeking before deciding what to do with it."""
     # Clamp rather than pass through: organiser-agent's /preview allocates
     # max_bytes BEFORE checking the real file size, so an uncapped value
@@ -1140,13 +1296,19 @@ async def pc_list(include_offline: bool = False) -> str:
     """
     try:
         flag = "true" if include_offline else "false"
-        out = await _ssh_server(f"curl -s 'http://127.0.0.1:7845/pcs?include_offline={flag}' 2>&1", timeout=10)
+        out = await _ssh_server(
+            f"curl -s 'http://127.0.0.1:7845/pcs?include_offline={flag}' 2>&1",
+            timeout=10,
+        )
         data = json.loads(out)
         pcs = data.get("pcs", [])
         if not pcs:
             if not include_offline:
                 return "No online PCs currently detected. (Pass `include_offline=True` to include offline PCs)."
-            lines = [f"- **{name}** (configured fallback, port {cfg.get('port')})" for name, cfg in sorted(_PC_REGISTRY.items())]
+            lines = [
+                f"- **{name}** (configured fallback, port {cfg.get('port')})"
+                for name, cfg in sorted(_PC_REGISTRY.items())
+            ]
             return "**Registered PCs:**\n" + "\n".join(lines)
         lines = []
         for pc in pcs:
@@ -1157,7 +1319,10 @@ async def pc_list(include_offline: bool = False) -> str:
             )
         return "**Auto-Detected PCs:**\n" + "\n".join(lines)
     except Exception:
-        lines = [f"- **{name}** (configured fallback, port {cfg.get('port')})" for name, cfg in sorted(_PC_REGISTRY.items())]
+        lines = [
+            f"- **{name}** (configured fallback, port {cfg.get('port')})"
+            for name, cfg in sorted(_PC_REGISTRY.items())
+        ]
         return "**Configured PCs (fallback mode):**\n" + "\n".join(lines)
 
 
@@ -1166,13 +1331,19 @@ async def pc_disk_usage(folder: str, pc: str = "default") -> str:
     """Return a breakdown of disk usage inside a folder on a PC, sorted largest-first."""
     data = await _org_get("/disk_usage", {"folder": folder}, pc=pc)
     items = data.get("items", [])
-    lines = [f"{i.get('size_human','?'):>10}  {i.get('path')}" for i in items]
+    lines = [f"{i.get('size_human', '?'):>10}  {i.get('path')}" for i in items]
     total = data.get("total_human", "?")
-    return f"**{folder}** — total: {total}\n" + "\n".join(lines) if lines else f"'{folder}' appears empty."
+    return (
+        f"**{folder}** — total: {total}\n" + "\n".join(lines)
+        if lines
+        else f"'{folder}' appears empty."
+    )
 
 
 @mcp.tool()
-async def pc_run_command(command: str, working_dir: str = "", pc: str = "default") -> str:
+async def pc_run_command(
+    command: str, working_dir: str = "", pc: str = "default"
+) -> str:
     """
     Run a shell command on a PC. Works on Windows (cmd/PowerShell) and
     Mac/Linux (bash). Avoid destructive commands; prefer pc_delete_file
@@ -1196,7 +1367,9 @@ async def pc_find_duplicates(folder: str, pc: str = "default") -> str:
         return "No duplicates found."
     lines = []
     for g in groups:
-        lines.append(f"{g.get('count')}× {g.get('size_human')} each, wasting {g.get('wasted_human')}:")
+        lines.append(
+            f"{g.get('count')}× {g.get('size_human')} each, wasting {g.get('wasted_human')}:"
+        )
         for f in g.get("files", []):
             lines.append(f"  - {f}")
     return "\n".join(lines)
@@ -1294,23 +1467,31 @@ def _parse_location(loc: str) -> tuple[str, str, str]:
     "" for sandbox/server, "<pc_name>" for pc, "<name>[@<account>]" for
     codespace."""
     if ":" not in loc:
-        raise ValueError(f"Malformed location '{loc}' -- expected 'kind:path' or 'kind:name:path'")
+        raise ValueError(
+            f"Malformed location '{loc}' -- expected 'kind:path' or 'kind:name:path'"
+        )
     kind, rest = loc.split(":", 1)
     kind = kind.strip().lower()
     if kind in ("sandbox", "server"):
         return kind, "", rest
     if kind in ("pc", "codespace"):
         if ":" not in rest:
-            raise ValueError(f"Malformed '{kind}:' location '{loc}' -- expected '{kind}:name:path'")
+            raise ValueError(
+                f"Malformed '{kind}:' location '{loc}' -- expected '{kind}:name:path'"
+            )
         name, path = rest.split(":", 1)
         # An empty name (e.g. "pc::/some/path") used to silently fall
         # back to the default PC / auto account downstream instead of
         # raising -- reject it here instead (security-qa finding 9).
         name_check = name.split("@", 1)[0] if kind == "codespace" else name
         if not name_check:
-            raise ValueError(f"Malformed '{kind}:' location '{loc}' -- empty name before the path")
+            raise ValueError(
+                f"Malformed '{kind}:' location '{loc}' -- empty name before the path"
+            )
         return kind, name, path
-    raise ValueError(f"Unknown location kind '{kind}' -- expected sandbox, server, pc, or codespace")
+    raise ValueError(
+        f"Unknown location kind '{kind}' -- expected sandbox, server, pc, or codespace"
+    )
 
 
 async def _location_read_bytes(loc: str) -> bytes:
@@ -1332,7 +1513,9 @@ async def _location_read_bytes(loc: str) -> bytes:
         try:
             size = int(size_str)
         except ValueError:
-            raise ValueError(f"Could not stat '{path}' on server (got: {size_str[:200]!r})")
+            raise ValueError(
+                f"Could not stat '{path}' on server (got: {size_str[:200]!r})"
+            )
         if size > _FILE_TRANSFER_MAX_BYTES:
             raise ValueError(
                 f"'{path}' on server is {size} bytes, over the {_FILE_TRANSFER_MAX_BYTES} "
@@ -1342,17 +1525,25 @@ async def _location_read_bytes(loc: str) -> bytes:
         try:
             return base64.b64decode(b64, validate=False)
         except Exception:
-            raise ValueError(f"Could not read '{path}' from server as a file (got: {b64[:200]!r})")
+            raise ValueError(
+                f"Could not read '{path}' from server as a file (got: {b64[:200]!r})"
+            )
 
     if kind == "pc":
         # Binary-safe as of agent/pc-agent's /read_file_b64 endpoint
         # (see coordination/status/pc-agent.md, broadcast [0006]) --
         # this used to go through /preview, which is text/UTF-8 only
         # and silently failed on any binary file.
-        data = await _org_get("/read_file_b64", {"path": path, "max_bytes": _FILE_TRANSFER_MAX_BYTES}, pc=name or "default")
+        data = await _org_get(
+            "/read_file_b64",
+            {"path": path, "max_bytes": _FILE_TRANSFER_MAX_BYTES},
+            pc=name or "default",
+        )
         content_b64 = data.get("content_b64")
         if content_b64 is None:
-            raise ValueError(f"Could not read '{path}' from pc:{name} -- {data.get('error', 'unknown error')}")
+            raise ValueError(
+                f"Could not read '{path}' from pc:{name} -- {data.get('error', 'unknown error')}"
+            )
         try:
             return base64.b64decode(content_b64, validate=True)
         except Exception as e:
@@ -1362,11 +1553,15 @@ async def _location_read_bytes(loc: str) -> bytes:
         cs_name, _, account = name.partition("@")
         account = account or "auto"
         # Same upfront-size-check reasoning as the server: kind above.
-        size_str = (await exec_command(cs_name, f"stat -c%s {_q(path)} 2>&1", account=account)).strip()
+        size_str = (
+            await exec_command(cs_name, f"stat -c%s {_q(path)} 2>&1", account=account)
+        ).strip()
         try:
             size = int(size_str)
         except ValueError:
-            raise ValueError(f"Could not stat '{path}' on codespace:{cs_name} (got: {size_str[:200]!r})")
+            raise ValueError(
+                f"Could not stat '{path}' on codespace:{cs_name} (got: {size_str[:200]!r})"
+            )
         if size > _FILE_TRANSFER_MAX_BYTES:
             raise ValueError(
                 f"'{path}' on codespace:{cs_name} is {size} bytes, over the "
@@ -1378,7 +1573,9 @@ async def _location_read_bytes(loc: str) -> bytes:
         try:
             return base64.b64decode(result.strip(), validate=False)
         except Exception:
-            raise ValueError(f"Could not read '{path}' from codespace:{cs_name} (got: {result[:200]!r})")
+            raise ValueError(
+                f"Could not read '{path}' from codespace:{cs_name} (got: {result[:200]!r})"
+            )
 
     raise AssertionError("unreachable")  # _parse_location already validated kind
 
@@ -1394,6 +1591,7 @@ async def _location_write_bytes(loc: str, data: bytes) -> str:
 
     if kind == "sandbox":
         import pathlib
+
         pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
             f.write(data)
@@ -1423,7 +1621,9 @@ async def _location_write_bytes(loc: str, data: bytes) -> str:
                 f"{_PC_TRANSFER_SAFE_MAX_BYTES} bytes."
             )
         encoded = base64.b64encode(data).decode("ascii")
-        result = await _org_post("/write_file", {"path": path, "content_b64": encoded}, pc=name or "default")
+        result = await _org_post(
+            "/write_file", {"path": path, "content_b64": encoded}, pc=name or "default"
+        )
         if result.get("error"):
             raise ValueError(f"Write to pc:{name}:'{path}' failed: {result['error']}")
         return f"pc:{name}:{path} ({len(data)} bytes)"
@@ -1478,6 +1678,7 @@ async def file_transfer(source: str, destination: str) -> str:
 # Diagnostics — test every configured subsystem
 # ---------------------------------------------------------------------------
 
+
 async def _run_diagnostics() -> dict:
     """
     Runs a lightweight health check for every subsystem this server can
@@ -1506,7 +1707,9 @@ async def _run_diagnostics() -> dict:
 
         async def _do(tok=token):
             async with httpx.AsyncClient() as client:
-                r = await client.get(f"{GITHUB_API}/user", headers=_gh_headers(tok), timeout=10)
+                r = await client.get(
+                    f"{GITHUB_API}/user", headers=_gh_headers(tok), timeout=10
+                )
             if r.status_code != 200:
                 raise RuntimeError(f"HTTP {r.status_code}")
             return f"authenticated as {r.json().get('login', '?')}"
@@ -1520,7 +1723,6 @@ async def _run_diagnostics() -> dict:
 
     await _check("Codespaces API", _codespaces())
 
-
     # Linux server
     async def _server():
         out = await _ssh_server("echo alive", timeout=15)
@@ -1532,6 +1734,7 @@ async def _run_diagnostics() -> dict:
 
     # Each configured PC
     for pc_name in sorted(_PC_REGISTRY.keys()):
+
         async def _pc(name=pc_name):
             data = await _org_get("/status", pc=name)
             return f"{data.get('platform', '?')} v{data.get('version', '?')}"
@@ -1540,22 +1743,34 @@ async def _run_diagnostics() -> dict:
 
     # Render API (needed for the admin settings panel)
     if RENDER_API_KEY and RENDER_SERVICE_ID:
+
         async def _render():
             async with httpx.AsyncClient() as client:
                 r = await client.get(
-                    f"{RENDER_API}/services/{RENDER_SERVICE_ID}", headers=_render_headers(), timeout=10
+                    f"{RENDER_API}/services/{RENDER_SERVICE_ID}",
+                    headers=_render_headers(),
+                    timeout=10,
                 )
             r.raise_for_status()
             return r.json().get("name", "?")
 
         await _check("Render API", _render())
     else:
-        checks.append({"name": "Render API", "status": "skip", "detail": "RENDER_API_KEY/RENDER_SERVICE_ID not configured"})
+        checks.append(
+            {
+                "name": "Render API",
+                "status": "skip",
+                "detail": "RENDER_API_KEY/RENDER_SERVICE_ID not configured",
+            }
+        )
 
     passed = sum(1 for c in checks if c["status"] == "pass")
     failed = sum(1 for c in checks if c["status"] == "fail")
     skipped = sum(1 for c in checks if c["status"] == "skip")
-    return {"checks": checks, "summary": f"{passed} passed, {failed} failed, {skipped} skipped"}
+    return {
+        "checks": checks,
+        "summary": f"{passed} passed, {failed} failed, {skipped} skipped",
+    }
 
 
 @mcp.tool()
@@ -1584,7 +1799,10 @@ async def run_diagnostics() -> str:
 # is a stateless HMAC-signed "<expiry>.<signature>" pair — no session
 # store needed for a single-admin personal dashboard.
 
-ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip() or os.environ.get("MCP_SERVER_PASSWORD", "").strip()
+ADMIN_PASSWORD = (
+    os.environ.get("ADMIN_PASSWORD", "").strip()
+    or os.environ.get("MCP_SERVER_PASSWORD", "").strip()
+)
 
 # SECURITY: no hardcoded fallback secret. A static in-source string here
 # would let anyone who has read this file forge a valid admin cookie
@@ -1601,17 +1819,25 @@ _ADMIN_COOKIE_SECRET = (
     or ADMIN_PASSWORD
     or secrets.token_hex(32)
 )
-_ADMIN_AUTH_CONFIGURED = bool(os.environ.get("ADMIN_COOKIE_SECRET", "").strip() or ADMIN_PASSWORD)
+_ADMIN_AUTH_CONFIGURED = bool(
+    os.environ.get("ADMIN_COOKIE_SECRET", "").strip() or ADMIN_PASSWORD
+)
 _ADMIN_SESSION_TTL = 60 * 60 * 12  # 12 hours
 _ADMIN_COOKIE_NAME = "admin_session"
 
 
 def _render_headers() -> dict:
-    return {"Authorization": f"Bearer {RENDER_API_KEY}", "Accept": "application/json", "Content-Type": "application/json"}
+    return {
+        "Authorization": f"Bearer {RENDER_API_KEY}",
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+    }
 
 
 def _admin_sign(payload: str) -> str:
-    return hmac.new(_ADMIN_COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.new(
+        _ADMIN_COOKIE_SECRET.encode(), payload.encode(), hashlib.sha256
+    ).hexdigest()
 
 
 def _admin_make_cookie() -> str:
@@ -1786,7 +2012,9 @@ async def _admin_page(request: Request) -> HTMLResponse:
     if not _admin_authed(request):
         body = _ADMIN_LOGIN_BODY.replace("__ERROR__", "")
         return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body))
-    body = _ADMIN_DASHBOARD_BODY.replace("__SERVICE_ID__", _html.escape(RENDER_SERVICE_ID))
+    body = _ADMIN_DASHBOARD_BODY.replace(
+        "__SERVICE_ID__", _html.escape(RENDER_SERVICE_ID)
+    )
     return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body))
 
 
@@ -1804,24 +2032,38 @@ async def _admin_login(request: Request) -> RedirectResponse | HTMLResponse:
     _ADMIN_LOGIN_ATTEMPTS[client_ip] = attempts
     if len(attempts) >= 5:
         body = _ADMIN_LOGIN_BODY.replace(
-            "__ERROR__", "<p style='color:#f85149'>Too many failed login attempts. Please wait 1 minute.</p>"
+            "__ERROR__",
+            "<p style='color:#f85149'>Too many failed login attempts. Please wait 1 minute.</p>",
         )
-        return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=429)
+        return HTMLResponse(
+            _ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=429
+        )
 
     if not ADMIN_PASSWORD:
         body = _ADMIN_LOGIN_BODY.replace(
-            "__ERROR__", "<p style='color:#f85149'>ADMIN_PASSWORD is not set — admin login is disabled.</p>"
+            "__ERROR__",
+            "<p style='color:#f85149'>ADMIN_PASSWORD is not set — admin login is disabled.</p>",
         )
-        return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=503)
+        return HTMLResponse(
+            _ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=503
+        )
     if not hmac.compare_digest(password, ADMIN_PASSWORD):
         _ADMIN_LOGIN_ATTEMPTS.setdefault(client_ip, []).append(now)
-        body = _ADMIN_LOGIN_BODY.replace("__ERROR__", "<p style='color:#f85149'>Wrong password.</p>")
-        return HTMLResponse(_ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=401)
+        body = _ADMIN_LOGIN_BODY.replace(
+            "__ERROR__", "<p style='color:#f85149'>Wrong password.</p>"
+        )
+        return HTMLResponse(
+            _ADMIN_PAGE_TEMPLATE.replace("__BODY__", body), status_code=401
+        )
     _ADMIN_LOGIN_ATTEMPTS.pop(client_ip, None)
     resp = RedirectResponse(url="/admin", status_code=303)
     resp.set_cookie(
-        _ADMIN_COOKIE_NAME, _admin_make_cookie(), max_age=_ADMIN_SESSION_TTL,
-        httponly=True, samesite="lax", secure=True,
+        _ADMIN_COOKIE_NAME,
+        _admin_make_cookie(),
+        max_age=_ADMIN_SESSION_TTL,
+        httponly=True,
+        samesite="lax",
+        secure=True,
         # secure=True: Render/Fly serve HTTPS exclusively in practice, so this
         # closes the "cookie sent over a mis-typed http:// URL" hole with zero
         # downside (external review A9, confirmed and fixed).
@@ -1872,7 +2114,10 @@ FLY_APP_NAME = os.environ.get("FLY_APP_NAME", "server-mcp-gemini").strip()
 
 
 def _fly_headers() -> dict:
-    return {"Authorization": f"Bearer {FLY_API_TOKEN}", "Content-Type": "application/json"}
+    return {
+        "Authorization": f"Bearer {FLY_API_TOKEN}",
+        "Content-Type": "application/json",
+    }
 
 
 async def _admin_api_env_get(request: Request) -> JSONResponse:
@@ -1912,16 +2157,30 @@ async def _admin_api_env_get(request: Request) -> JSONResponse:
     if RENDER_API_KEY and RENDER_SERVICE_ID:
         try:
             async with httpx.AsyncClient() as client:
-                r = await client.get(f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars", headers=_render_headers(), timeout=15)
+                r = await client.get(
+                    f"{RENDER_API}/services/{RENDER_SERVICE_ID}/env-vars",
+                    headers=_render_headers(),
+                    timeout=15,
+                )
             r.raise_for_status()
             items = r.json()
-            env_vars = [{"key": i["envVar"]["key"], "value": _mask_secret_value(i["envVar"]["value"])} for i in items]
+            env_vars = [
+                {
+                    "key": i["envVar"]["key"],
+                    "value": _mask_secret_value(i["envVar"]["value"]),
+                }
+                for i in items
+            ]
             env_vars.sort(key=lambda v: v["key"])
             return JSONResponse({"vars": env_vars, "platform": "render"})
         except httpx.HTTPError as e:
             return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
 
-    return JSONResponse({"error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."})
+    return JSONResponse(
+        {
+            "error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."
+        }
+    )
 
 
 async def _admin_api_env_set(request: Request) -> JSONResponse:
@@ -1960,7 +2219,12 @@ async def _admin_api_env_set(request: Request) -> JSONResponse:
                     timeout=15,
                 )
             r.raise_for_status()
-            return JSONResponse({"ok": True, "note": f"Saved secret '{key}' to Fly.io app '{FLY_APP_NAME}'."})
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "note": f"Saved secret '{key}' to Fly.io app '{FLY_APP_NAME}'.",
+                }
+            )
         except httpx.HTTPError as e:
             return JSONResponse({"error": f"Fly.io API error: {e}"}, status_code=502)
 
@@ -1975,11 +2239,21 @@ async def _admin_api_env_set(request: Request) -> JSONResponse:
                     timeout=15,
                 )
             r.raise_for_status()
-            return JSONResponse({"ok": True, "note": "Saved. Click 'Trigger redeploy' for it to take effect."})
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "note": "Saved. Click 'Trigger redeploy' for it to take effect.",
+                }
+            )
         except httpx.HTTPError as e:
             return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
 
-    return JSONResponse({"error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."}, status_code=400)
+    return JSONResponse(
+        {
+            "error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."
+        },
+        status_code=400,
+    )
 
 
 async def _admin_api_deploy(request: Request) -> JSONResponse:
@@ -2006,7 +2280,13 @@ async def _admin_api_deploy(request: Request) -> JSONResponse:
                     timeout=15,
                 )
             r.raise_for_status()
-            return JSONResponse({"ok": True, "deploy": r.json(), "note": f"Restart triggered for Fly app '{FLY_APP_NAME}'."})
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "deploy": r.json(),
+                    "note": f"Restart triggered for Fly app '{FLY_APP_NAME}'.",
+                }
+            )
         except httpx.HTTPError as e:
             return JSONResponse({"error": f"Fly.io API error: {e}"}, status_code=502)
 
@@ -2025,7 +2305,12 @@ async def _admin_api_deploy(request: Request) -> JSONResponse:
         except httpx.HTTPError as e:
             return JSONResponse({"error": f"Render API error: {e}"}, status_code=502)
 
-    return JSONResponse({"error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."}, status_code=400)
+    return JSONResponse(
+        {
+            "error": "Neither FLY_API_TOKEN nor RENDER_API_KEY is configured on this deployment."
+        },
+        status_code=400,
+    )
 
 
 async def _admin_api_server_run(request: Request) -> JSONResponse:
@@ -2051,7 +2336,9 @@ async def _admin_api_fleet(request: Request) -> JSONResponse:
         return denied
     pcs = []
     # Merge static registry and dynamic discovery
-    all_names = sorted(set(list(_PC_REGISTRY.keys()) + list(_PC_V2_DYNAMIC_REGISTRY.keys())))
+    all_names = sorted(
+        set(list(_PC_REGISTRY.keys()) + list(_PC_V2_DYNAMIC_REGISTRY.keys()))
+    )
     for name in all_names:
         cfg = _PC_REGISTRY.get(name, {})
         dyn = _PC_V2_DYNAMIC_REGISTRY.get(name, {})
@@ -2065,17 +2352,19 @@ async def _admin_api_fleet(request: Request) -> JSONResponse:
             details = res
         except Exception as e:
             details = {"error": str(e)}
-        pcs.append({
-            "name": name,
-            "port": port,
-            "status": status,
-            "machine_name": details.get("machine_name", dyn.get("name", name)),
-            "machine_id": details.get("machine_id", dyn.get("id", "?")),
-            "version": details.get("version", "?"),
-            "platform": details.get("platform", "windows"),
-            "lan_ip": lan_ip,
-            "last_event": dyn.get("event", "unknown"),
-        })
+        pcs.append(
+            {
+                "name": name,
+                "port": port,
+                "status": status,
+                "machine_name": details.get("machine_name", dyn.get("name", name)),
+                "machine_id": details.get("machine_id", dyn.get("id", "?")),
+                "version": details.get("version", "?"),
+                "platform": details.get("platform", "windows"),
+                "lan_ip": lan_ip,
+                "last_event": dyn.get("event", "unknown"),
+            }
+        )
     return JSONResponse({"fleet": pcs})
 
 
@@ -2125,7 +2414,10 @@ async def _admin_api_codespaces(request: Request) -> JSONResponse:
         async with httpx.AsyncClient() as client:
             r = await client.get(
                 f"{GITHUB_API}/user/codespaces",
-                headers={"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"},
+                headers={
+                    "Authorization": f"token {token}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
                 timeout=10,
             )
             r.raise_for_status()
@@ -2215,30 +2507,35 @@ async def _events_pc_status(request: Request) -> JSONResponse:
 # OAuth 2.1 Web Authorization Flow Endpoints
 # ---------------------------------------------------------------------------
 
+
 async def _oauth_metadata(request: Request) -> JSONResponse:
     host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
     base_url = f"https://{host}" if not host.startswith("http") else host
-    return JSONResponse({
-        "issuer": base_url,
-        "authorization_endpoint": f"{base_url}/oauth/authorize",
-        "token_endpoint": f"{base_url}/oauth/token",
-        "registration_endpoint": f"{base_url}/oauth/register",
-        "response_types_supported": ["code"],
-        "grant_types_supported": ["authorization_code", "refresh_token"],
-        "code_challenge_methods_supported": ["S256", "plain"],
-        "scopes_supported": ["mcp"],
-    })
+    return JSONResponse(
+        {
+            "issuer": base_url,
+            "authorization_endpoint": f"{base_url}/oauth/authorize",
+            "token_endpoint": f"{base_url}/oauth/token",
+            "registration_endpoint": f"{base_url}/oauth/register",
+            "response_types_supported": ["code"],
+            "grant_types_supported": ["authorization_code", "refresh_token"],
+            "code_challenge_methods_supported": ["S256", "plain"],
+            "scopes_supported": ["mcp"],
+        }
+    )
 
 
 async def _oauth_protected_resource(request: Request) -> JSONResponse:
     host = _allowed_host or request.headers.get("host", "server-mcp-gemini.fly.dev")
     base_url = f"https://{host}" if not host.startswith("http") else host
-    return JSONResponse({
-        "resource": base_url,
-        "authorization_servers": [base_url],
-        "scopes_supported": ["mcp"],
-        "bearer_methods_supported": ["header", "query"],
-    })
+    return JSONResponse(
+        {
+            "resource": base_url,
+            "authorization_servers": [base_url],
+            "scopes_supported": ["mcp"],
+            "bearer_methods_supported": ["header", "query"],
+        }
+    )
 
 
 async def _oauth_register(request: Request) -> JSONResponse:
@@ -2248,27 +2545,34 @@ async def _oauth_register(request: Request) -> JSONResponse:
         data = {}
     client_id = f"client_{secrets.token_hex(8)}"
     client_secret = f"secret_{secrets.token_hex(16)}"
-    redirect_uris = data.get("redirect_uris", ["https://claude.ai/api/mcp/auth_callback"])
+    redirect_uris = data.get(
+        "redirect_uris", ["https://claude.ai/api/mcp/auth_callback"]
+    )
     client_name = data.get("client_name") or data.get("client_name", "Client App")
     _OAUTH_CLIENTS[client_id] = {
         "client_name": client_name,
         "client_secret": client_secret,
         "redirect_uris": redirect_uris,
     }
-    return JSONResponse({
-        "client_id": client_id,
-        "client_secret": client_secret,
-        "client_name": client_name,
-        "redirect_uris": redirect_uris,
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-    }, status_code=201)
+    return JSONResponse(
+        {
+            "client_id": client_id,
+            "client_secret": client_secret,
+            "client_name": client_name,
+            "redirect_uris": redirect_uris,
+            "grant_types": ["authorization_code", "refresh_token"],
+            "response_types": ["code"],
+        },
+        status_code=201,
+    )
 
 
 async def _oauth_authorize_get(request: Request) -> HTMLResponse:
     params = request.query_params
     client_id = _html.escape(params.get("client_id", ""))
-    redirect_uri = _html.escape(params.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback"))
+    redirect_uri = _html.escape(
+        params.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback")
+    )
     state = _html.escape(params.get("state", ""))
     code_challenge = _html.escape(params.get("code_challenge", ""))
     code_challenge_method = _html.escape(params.get("code_challenge_method", "plain"))
@@ -2336,7 +2640,9 @@ async def _oauth_authorize_post(request: Request) -> Response:
     form = await request.form()
     password = str(form.get("password", "")).strip()
     client_id = str(form.get("client_id", ""))
-    redirect_uri = str(form.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback"))
+    redirect_uri = str(
+        form.get("redirect_uri", "https://claude.ai/api/mcp/auth_callback")
+    )
     state = str(form.get("state", ""))
     code_challenge = str(form.get("code_challenge", ""))
     code_challenge_method = str(form.get("code_challenge_method", "plain"))
@@ -2390,20 +2696,34 @@ async def _oauth_token(request: Request) -> JSONResponse:
         if refresh_token:
             _OAUTH_REFRESH_TOKENS[refresh_token] = new_access_token
         _save_oauth_data()
-        return JSONResponse({
-            "access_token": new_access_token,
-            "token_type": "Bearer",
-            "expires_in": 315360000,
-            "refresh_token": new_refresh_token,
-            "scope": "mcp",
-        })
+        return JSONResponse(
+            {
+                "access_token": new_access_token,
+                "token_type": "Bearer",
+                "expires_in": 315360000,
+                "refresh_token": new_refresh_token,
+                "scope": "mcp",
+            }
+        )
 
     if grant_type != "authorization_code" or not code or code not in _OAUTH_CODES:
-        return JSONResponse({"error": "invalid_grant", "error_description": "Invalid or expired authorization code"}, status_code=400)
+        return JSONResponse(
+            {
+                "error": "invalid_grant",
+                "error_description": "Invalid or expired authorization code",
+            },
+            status_code=400,
+        )
 
     code_info = _OAUTH_CODES.pop(code)
     if time.time() > code_info["expires_at"]:
-        return JSONResponse({"error": "invalid_grant", "error_description": "Authorization code expired"}, status_code=400)
+        return JSONResponse(
+            {
+                "error": "invalid_grant",
+                "error_description": "Authorization code expired",
+            },
+            status_code=400,
+        )
 
     code_challenge = code_info.get("code_challenge")
     method = code_info.get("code_challenge_method", "plain")
@@ -2412,10 +2732,22 @@ async def _oauth_token(request: Request) -> JSONResponse:
             hashed = hashlib.sha256(code_verifier.encode("utf-8")).digest()
             computed = base64.urlsafe_b64encode(hashed).decode("utf-8").rstrip("=")
             if not hmac.compare_digest(computed, code_challenge.rstrip("=")):
-                return JSONResponse({"error": "invalid_grant", "error_description": "PKCE code_verifier check failed"}, status_code=400)
+                return JSONResponse(
+                    {
+                        "error": "invalid_grant",
+                        "error_description": "PKCE code_verifier check failed",
+                    },
+                    status_code=400,
+                )
         else:
             if not hmac.compare_digest(code_verifier, code_challenge):
-                return JSONResponse({"error": "invalid_grant", "error_description": "PKCE code_verifier check failed"}, status_code=400)
+                return JSONResponse(
+                    {
+                        "error": "invalid_grant",
+                        "error_description": "PKCE code_verifier check failed",
+                    },
+                    status_code=400,
+                )
 
     access_token = _generate_oauth_token()
     new_refresh_token = _generate_refresh_token()
@@ -2423,13 +2755,15 @@ async def _oauth_token(request: Request) -> JSONResponse:
     _OAUTH_REFRESH_TOKENS[new_refresh_token] = access_token
     _save_oauth_data()
 
-    return JSONResponse({
-        "access_token": access_token,
-        "token_type": "Bearer",
-        "expires_in": 315360000,
-        "refresh_token": new_refresh_token,
-        "scope": "mcp",
-    })
+    return JSONResponse(
+        {
+            "access_token": access_token,
+            "token_type": "Bearer",
+            "expires_in": 315360000,
+            "refresh_token": new_refresh_token,
+            "scope": "mcp",
+        }
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2473,31 +2807,74 @@ app.router.routes.insert(1, Route("/healthz", _health, methods=["GET", "HEAD"]))
 app.router.routes.insert(2, Route("/admin", _admin_page, methods=["GET"]))
 app.router.routes.insert(3, Route("/admin/login", _admin_login, methods=["POST"]))
 app.router.routes.insert(4, Route("/admin/logout", _admin_logout, methods=["GET"]))
-app.router.routes.insert(5, Route("/admin/api/env", _admin_api_env_get, methods=["GET"]))
-app.router.routes.insert(6, Route("/admin/api/env", _admin_api_env_set, methods=["POST"]))
-app.router.routes.insert(7, Route("/admin/api/deploy", _admin_api_deploy, methods=["POST"]))
-app.router.routes.insert(8, Route("/admin/api/server/run", _admin_api_server_run, methods=["POST"]))
-app.router.routes.insert(9, Route("/admin/api/diagnostics", _admin_api_diagnostics, methods=["GET"]))
-app.router.routes.insert(10, Route("/admin/api/fleet", _admin_api_fleet, methods=["GET"]))
-app.router.routes.insert(11, Route("/admin/api/pc/screenshot", _admin_api_pc_screenshot, methods=["POST"]))
-app.router.routes.insert(12, Route("/admin/api/pc/cmd", _admin_api_pc_cmd, methods=["POST"]))
-app.router.routes.insert(13, Route("/admin/api/pc/disk", _admin_api_pc_disk, methods=["GET"]))
-app.router.routes.insert(14, Route("/admin/api/codespaces", _admin_api_codespaces, methods=["GET"]))
-app.router.routes.insert(15, Route("/admin/api/server/overview", _admin_api_server_overview, methods=["GET"]))
-app.router.routes.insert(16, Route("/admin/api/server/service", _admin_api_server_service, methods=["POST"]))
-app.router.routes.insert(17, Route("/admin/api/transfer", _admin_api_transfer, methods=["POST"]))
-app.router.routes.insert(18, Route("/events/pc_status", _events_pc_status, methods=["POST"]))
-app.router.routes.insert(19, Route("/.well-known/oauth-authorization-server", _oauth_metadata, methods=["GET"]))
-app.router.routes.insert(20, Route("/.well-known/oauth-protected-resource", _oauth_protected_resource, methods=["GET"]))
-app.router.routes.insert(21, Route("/oauth/register", _oauth_register, methods=["POST"]))
-app.router.routes.insert(22, Route("/oauth/authorize", _oauth_authorize_get, methods=["GET"]))
-app.router.routes.insert(23, Route("/oauth/authorize", _oauth_authorize_post, methods=["POST"]))
+app.router.routes.insert(
+    5, Route("/admin/api/env", _admin_api_env_get, methods=["GET"])
+)
+app.router.routes.insert(
+    6, Route("/admin/api/env", _admin_api_env_set, methods=["POST"])
+)
+app.router.routes.insert(
+    7, Route("/admin/api/deploy", _admin_api_deploy, methods=["POST"])
+)
+app.router.routes.insert(
+    8, Route("/admin/api/server/run", _admin_api_server_run, methods=["POST"])
+)
+app.router.routes.insert(
+    9, Route("/admin/api/diagnostics", _admin_api_diagnostics, methods=["GET"])
+)
+app.router.routes.insert(
+    10, Route("/admin/api/fleet", _admin_api_fleet, methods=["GET"])
+)
+app.router.routes.insert(
+    11, Route("/admin/api/pc/screenshot", _admin_api_pc_screenshot, methods=["POST"])
+)
+app.router.routes.insert(
+    12, Route("/admin/api/pc/cmd", _admin_api_pc_cmd, methods=["POST"])
+)
+app.router.routes.insert(
+    13, Route("/admin/api/pc/disk", _admin_api_pc_disk, methods=["GET"])
+)
+app.router.routes.insert(
+    14, Route("/admin/api/codespaces", _admin_api_codespaces, methods=["GET"])
+)
+app.router.routes.insert(
+    15, Route("/admin/api/server/overview", _admin_api_server_overview, methods=["GET"])
+)
+app.router.routes.insert(
+    16, Route("/admin/api/server/service", _admin_api_server_service, methods=["POST"])
+)
+app.router.routes.insert(
+    17, Route("/admin/api/transfer", _admin_api_transfer, methods=["POST"])
+)
+app.router.routes.insert(
+    18, Route("/events/pc_status", _events_pc_status, methods=["POST"])
+)
+app.router.routes.insert(
+    19,
+    Route("/.well-known/oauth-authorization-server", _oauth_metadata, methods=["GET"]),
+)
+app.router.routes.insert(
+    20,
+    Route(
+        "/.well-known/oauth-protected-resource",
+        _oauth_protected_resource,
+        methods=["GET"],
+    ),
+)
+app.router.routes.insert(
+    21, Route("/oauth/register", _oauth_register, methods=["POST"])
+)
+app.router.routes.insert(
+    22, Route("/oauth/authorize", _oauth_authorize_get, methods=["GET"])
+)
+app.router.routes.insert(
+    23, Route("/oauth/authorize", _oauth_authorize_post, methods=["POST"])
+)
 app.router.routes.insert(24, Route("/oauth/token", _oauth_token, methods=["POST"]))
 
 
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)
-
-

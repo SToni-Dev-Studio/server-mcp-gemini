@@ -8,6 +8,7 @@ No real infrastructure is touched: _ssh_server / exec_command are
 monkeypatched everywhere so nothing ever reaches a real SSH host, and the
 HTTP tests run the real Starlette app in-process via TestClient.
 """
+
 import asyncio
 import base64
 import importlib
@@ -23,8 +24,13 @@ def _fresh_server(env_overrides: dict):
     """Reload server.py with a controlled environment. Mirrors the pattern
     already established in tests/test_admin_cookie_auth.py."""
     for k in [
-        "MCP_SERVER_PASSWORD", "ADMIN_PASSWORD", "ADMIN_COOKIE_SECRET",
-        "RENDER_EXTERNAL_HOSTNAME", "MCP_ALLOWED_HOST", "FLY_APP_NAME", "PORT",
+        "MCP_SERVER_PASSWORD",
+        "ADMIN_PASSWORD",
+        "ADMIN_COOKIE_SECRET",
+        "RENDER_EXTERNAL_HOSTNAME",
+        "MCP_ALLOWED_HOST",
+        "FLY_APP_NAME",
+        "PORT",
     ]:
         os.environ.pop(k, None)
     os.environ.update(env_overrides)
@@ -39,6 +45,7 @@ def _fresh_server(env_overrides: dict):
 def client_with_password():
     srv = _fresh_server({"MCP_SERVER_PASSWORD": "test-password-123", "PORT": "18000"})
     from starlette.testclient import TestClient
+
     with TestClient(srv.app) as c:
         yield c, "test-password-123"
 
@@ -110,11 +117,14 @@ def test_public_deployment_fails_closed_without_password():
     public deployment (RENDER_EXTERNAL_HOSTNAME set) but no
     MCP_SERVER_PASSWORD is configured, /mcp must refuse traffic rather
     than silently running with no auth at all."""
-    srv = _fresh_server({
-        "RENDER_EXTERNAL_HOSTNAME": "myapp.onrender.com",
-        "PORT": "18000",
-    })
+    srv = _fresh_server(
+        {
+            "RENDER_EXTERNAL_HOSTNAME": "myapp.onrender.com",
+            "PORT": "18000",
+        }
+    )
     from starlette.testclient import TestClient
+
     with TestClient(srv.app) as c:
         r = c.post("/mcp", json={})
         assert r.status_code == 503, (
@@ -176,8 +186,11 @@ async def test_server_read_file_path_is_shell_safe(srv_with_captured_ssh, payloa
     assert "PWNED" not in cmd or "'\"'\"'" in cmd or cmd.count("'") >= 2
     # Concretely: shlex.quote must have wrapped it. Round-trip check:
     import shlex
+
     tokens = shlex.split(cmd)
-    assert payload in tokens, f"payload was not preserved as a single safe token: {cmd!r}"
+    assert payload in tokens, (
+        f"payload was not preserved as a single safe token: {cmd!r}"
+    )
 
 
 @pytest.mark.asyncio
@@ -186,6 +199,7 @@ async def test_server_move_file_both_paths_shell_safe(srv_with_captured_ssh):
     payload = INJECTION_PAYLOADS[0]
     await srv.server_move_file(payload, "/tmp/dest")
     import shlex
+
     tokens = shlex.split(captured[-1])
     assert payload in tokens
 
@@ -215,12 +229,15 @@ async def test_service_control_rejects_unknown_action(srv_with_captured_ssh):
 # codespace_name argument specifically.
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture
 def srv_with_captured_exec():
     srv = _fresh_server({"PORT": "18000"})
     captured = []
 
-    async def fake_exec_command(codespace_name, command, timeout_seconds=60, account="auto"):
+    async def fake_exec_command(
+        codespace_name, command, timeout_seconds=60, account="auto"
+    ):
         captured.append((codespace_name, command))
         return "MOCKED"
 
@@ -234,6 +251,7 @@ async def test_server_delete_file_path_is_shell_safe(srv_with_captured_ssh, payl
     srv, captured = srv_with_captured_ssh
     await srv.server_delete_file(payload)
     import shlex
+
     tokens = shlex.split(captured[-1])
     assert payload in tokens
 
@@ -245,6 +263,7 @@ async def test_read_codespace_file_path_is_shell_safe(srv_with_captured_exec, pa
     await srv.read_codespace_file("my-codespace", payload)
     codespace_name, cmd = captured[-1]
     import shlex
+
     tokens = shlex.split(cmd)
     assert payload in tokens
 
@@ -256,6 +275,7 @@ async def test_write_codespace_file_path_is_shell_safe(srv_with_captured_exec, p
     await srv.write_codespace_file("my-codespace", payload, "irrelevant content")
     codespace_name, cmd = captured[-1]
     import shlex
+
     tokens = shlex.split(cmd)
     assert payload in tokens
 
@@ -270,6 +290,7 @@ async def test_write_codespace_file_content_is_base64_safe(srv_with_captured_exe
     codespace_name, cmd = captured[-1]
     assert "touch /tmp/PWNED" not in cmd  # never appears as literal shell syntax
     import re
+
     m = re.search(r"echo '?([A-Za-z0-9+/=]+)'? \| base64", cmd)
     assert m, f"could not find base64 payload in command: {cmd!r}"
 
@@ -285,6 +306,7 @@ async def test_exec_command_codespace_name_is_passed_as_argv_not_shell(monkeypat
 
     class FakeProc:
         returncode = 0
+
         async def communicate(self):
             return b"ok", b""
 
@@ -292,7 +314,9 @@ async def test_exec_command_codespace_name_is_passed_as_argv_not_shell(monkeypat
         captured_argv.append(args)
         return FakeProc()
 
-    monkeypatch.setattr(srv.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    monkeypatch.setattr(
+        srv.asyncio, "create_subprocess_exec", fake_create_subprocess_exec
+    )
     monkeypatch.setattr(srv.shutil, "which", lambda name: "/usr/bin/gh")
     monkeypatch.setenv("GITHUB_TOKEN", "fake-token-for-test")
 
@@ -304,7 +328,9 @@ async def test_exec_command_codespace_name_is_passed_as_argv_not_shell(monkeypat
     # the malicious string must appear as a single, standalone argv
     # element (never split/interpreted by a shell) -- prove it by
     # checking it's present verbatim as one item in the args tuple.
-    assert malicious_name in argv, f"codespace_name not passed as a single argv token: {argv!r}"
+    assert malicious_name in argv, (
+        f"codespace_name not passed as a single argv token: {argv!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,6 +352,7 @@ async def test_exec_command_codespace_name_is_passed_as_argv_not_shell(monkeypat
 # this correctly via pathlib and is NOT affected).
 # ---------------------------------------------------------------------------
 
+
 def test_write_codespace_file_mkdir_breaks_on_path_with_space(monkeypatch, tmp_path):
     """Documents (does not fix) a real bug: the unquoted $(dirname ...)
     word-splits on the space, so mkdir creates the wrong directories and
@@ -334,7 +361,9 @@ def test_write_codespace_file_mkdir_breaks_on_path_with_space(monkeypatch, tmp_p
     srv = _fresh_server({"PORT": "18000"})
     captured = {}
 
-    async def fake_exec_command(codespace_name, command, timeout_seconds=60, account="auto"):
+    async def fake_exec_command(
+        codespace_name, command, timeout_seconds=60, account="auto"
+    ):
         captured["cmd"] = command
         return "NOT_RUN"
 
@@ -345,7 +374,10 @@ def test_write_codespace_file_mkdir_breaks_on_path_with_space(monkeypatch, tmp_p
     real_cmd = captured["cmd"]
 
     import subprocess
-    r = subprocess.run(["bash", "-c", real_cmd], cwd=str(tmp_path), capture_output=True, text=True)
+
+    r = subprocess.run(
+        ["bash", "-c", real_cmd], cwd=str(tmp_path), capture_output=True, text=True
+    )
 
     assert r.returncode != 0, (
         "if this now succeeds, the mkdir word-splitting bug was fixed -- "
@@ -359,7 +391,9 @@ def test_write_codespace_file_mkdir_breaks_on_path_with_space(monkeypatch, tmp_p
 
 
 @pytest.mark.asyncio
-async def test_file_transfer_server_write_mkdir_breaks_on_path_with_space(monkeypatch, tmp_path):
+async def test_file_transfer_server_write_mkdir_breaks_on_path_with_space(
+    monkeypatch, tmp_path
+):
     srv = _fresh_server({"PORT": "18000"})
     captured = {}
 
@@ -376,8 +410,10 @@ async def test_file_transfer_server_write_mkdir_breaks_on_path_with_space(monkey
     real_cmd = captured["cmd"]
 
     import subprocess
-    r = subprocess.run(["bash", "-c", real_cmd], cwd=str(tmp_path), capture_output=True, text=True)
+
+    r = subprocess.run(
+        ["bash", "-c", real_cmd], cwd=str(tmp_path), capture_output=True, text=True
+    )
     assert r.returncode != 0
     assert (tmp_path / "my").is_dir()
     assert (tmp_path / "dir").is_dir()
-

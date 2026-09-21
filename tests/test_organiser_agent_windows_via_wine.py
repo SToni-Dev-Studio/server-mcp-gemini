@@ -42,6 +42,7 @@ available in the environment -- both were installed for this engagement
 via `apt-get install g++-mingw-w64-x86-64 wine64` (both come from
 Ubuntu's own package repos, no untrusted third-party sources).
 """
+
 import json
 import os
 import shutil
@@ -76,11 +77,25 @@ def windows_binary(tmp_path_factory):
     build_dir = tmp_path_factory.mktemp("organiser-build-windows")
     exe = str(build_dir / "organiser-agent.exe")
     r = subprocess.run(
-        [MINGW, "-std=c++17", "-O0", "-static", "-o", exe, CPP_SRC, "-lws2_32", "-lgdi32"],
-        capture_output=True, text=True, timeout=180,
+        [
+            MINGW,
+            "-std=c++17",
+            "-O0",
+            "-static",
+            "-o",
+            exe,
+            CPP_SRC,
+            "-lws2_32",
+            "-lgdi32",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
     )
     if r.returncode != 0:
-        pytest.fail(f"organiser-agent.cpp failed to cross-compile for Windows:\n{r.stderr[-4000:]}")
+        pytest.fail(
+            f"organiser-agent.cpp failed to cross-compile for Windows:\n{r.stderr[-4000:]}"
+        )
     return exe
 
 
@@ -88,7 +103,9 @@ def windows_binary(tmp_path_factory):
 def wine_prefix(tmp_path_factory):
     prefix = str(tmp_path_factory.mktemp("wineprefix"))
     env = dict(os.environ, WINEPREFIX=prefix, WINEARCH="win64", WINEDEBUG="-all")
-    subprocess.run(["wine", "wineboot", "--init"], env=env, capture_output=True, timeout=60)
+    subprocess.run(
+        ["wine", "wineboot", "--init"], env=env, capture_output=True, timeout=60
+    )
     return prefix
 
 
@@ -98,11 +115,16 @@ def running_windows_agent(windows_binary, wine_prefix, tmp_path):
     env = dict(os.environ, WINEPREFIX=wine_prefix, WINEARCH="win64", WINEDEBUG="-all")
     env.pop("ORGANISER_SECRET", None)
     env["ORGANISER_PORT"] = str(port)
-    proc = subprocess.Popen(["wine", windows_binary], env=env,
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        ["wine", windows_binary],
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
     base = f"http://127.0.0.1:{port}"
     try:
         import urllib.request
+
         for _ in range(100):
             try:
                 r = urllib.request.urlopen(f"{base}/status", timeout=0.5)
@@ -129,6 +151,7 @@ def running_windows_agent(windows_binary, wine_prefix, tmp_path):
 
 def _get(base, path):
     import urllib.request
+
     req = urllib.request.Request(base + path)
     try:
         with urllib.request.urlopen(req, timeout=8) as r:
@@ -141,9 +164,14 @@ def _get(base, path):
 
 def _post(base, path, body):
     import urllib.request
+
     data = json.dumps(body).encode()
-    req = urllib.request.Request(base + path, data=data,
-                                  headers={"Content-Type": "application/json"}, method="POST")
+    req = urllib.request.Request(
+        base + path,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
     try:
         with urllib.request.urlopen(req, timeout=8) as r:
             return r.status, r.read()
@@ -160,7 +188,9 @@ def test_protected_path_blocks_windows_dir_on_real_windows(running_windows_agent
     assert b"protected" in body.lower()
 
 
-def test_protected_path_traversal_via_forward_slashes_IS_caught_on_real_windows(running_windows_agent):
+def test_protected_path_traversal_via_forward_slashes_IS_caught_on_real_windows(
+    running_windows_agent,
+):
     """The exact case tests/test_organiser_agent.py's Flask-side
     equivalent honestly marks @unittest.expectedFailure on Linux,
     explaining that real Windows path normalization would catch it but
@@ -180,7 +210,9 @@ def test_protected_path_does_not_false_positive_on_sibling_dir(running_windows_a
     assert status == 200
 
 
-def test_working_dir_injection_is_closed_on_real_windows(running_windows_agent, tmp_path):
+def test_working_dir_injection_is_closed_on_real_windows(
+    running_windows_agent, tmp_path
+):
     """Uses a real detectable side effect (a marker file written via a
     redirect) rather than a naive substring check, since the correct
     rejection message legitimately echoes the attempted payload text
@@ -192,9 +224,14 @@ def test_working_dir_injection_is_closed_on_real_windows(running_windows_agent, 
     marker_path = os.path.join(legit_dir, "PWNED_MARKER.txt")
 
     payload_working_dir = 'C:\\wine-test-legit-dir" & echo INJECTED > C:\\wine-test-legit-dir\\PWNED_MARKER.txt & echo "'
-    status, body = _post(base, "/run_command", {
-        "command": "echo should_not_matter", "working_dir": payload_working_dir,
-    })
+    status, body = _post(
+        base,
+        "/run_command",
+        {
+            "command": "echo should_not_matter",
+            "working_dir": payload_working_dir,
+        },
+    )
     text = body.decode(errors="replace")
     assert "does not exist" in text or "not a directory" in text
     assert not os.path.exists(marker_path), (
@@ -209,14 +246,21 @@ def test_working_dir_legitimate_use_still_works_on_real_windows(running_windows_
     with open(os.path.join(legit_dir, "present.txt"), "w") as f:
         f.write("marker")
 
-    status, body = _post(base, "/run_command", {
-        "command": "dir", "working_dir": "C:\\wine-test-legit-dir2",
-    })
+    status, body = _post(
+        base,
+        "/run_command",
+        {
+            "command": "dir",
+            "working_dir": "C:\\wine-test-legit-dir2",
+        },
+    )
     assert status == 200
     assert b"present.txt" in body
 
 
-def test_max_bytes_oversized_is_clamped_and_returns_real_content_FIXED(running_windows_agent):
+def test_max_bytes_oversized_is_clamped_and_returns_real_content_FIXED(
+    running_windows_agent,
+):
     """FIXED (finding 4): max_bytes is now clamped to a MAX_READ_BYTES
     ceiling AND to the real file size (checked via fs::file_size before
     allocating), so a 10GB request against a tiny file no longer even

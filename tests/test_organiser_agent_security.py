@@ -29,6 +29,7 @@ deleted (per this file's own established convention):
     can rotate an existing secret but can never bootstrap the first one
     over the network.
 """
+
 import json
 import os
 import shutil
@@ -54,7 +55,9 @@ def agent_binary(tmp_path_factory):
     binary = str(build_dir / "organiser-agent")
     r = subprocess.run(
         ["g++", "-std=c++17", "-O0", "-o", binary, CPP_SRC, "-lpthread"],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
     )
     if r.returncode != 0:
         pytest.fail(f"organiser-agent.cpp failed to compile:\n{r.stderr[-4000:]}")
@@ -87,7 +90,9 @@ def running_agent(binary, secret=None, extra_env=None):
         env["ORGANISER_SECRET"] = secret
     if extra_env:
         env.update(extra_env)
-    proc = subprocess.Popen(binary, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        binary, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     try:
         base = f"http://127.0.0.1:{port}"
         for _ in range(50):
@@ -191,7 +196,8 @@ def test_working_dir_command_injection(agent_binary, tmp_path):
     payload_working_dir = f"x' ; touch {marker} ; echo '"
     with running_agent(agent_binary, secret=None) as (base, _):
         status, body = _post(
-            base, "/run_command",
+            base,
+            "/run_command",
             {"command": "echo should_not_matter", "working_dir": payload_working_dir},
         )
         # Fixed behavior: this isn't a real directory, so it's now a
@@ -207,7 +213,9 @@ def test_working_dir_command_injection(agent_binary, tmp_path):
     )
 
 
-def test_working_dir_injection_via_real_directory_with_malicious_name(agent_binary, tmp_path):
+def test_working_dir_injection_via_real_directory_with_malicious_name(
+    agent_binary, tmp_path
+):
     """Stricter companion to the test above: proves the underlying
     chdir()/CreateProcess mechanism is safe, not just that the
     is_directory() precheck happens to reject payloads that aren't real
@@ -220,7 +228,8 @@ def test_working_dir_injection_via_real_directory_with_malicious_name(agent_bina
     assert not marker.exists()
     with running_agent(agent_binary, secret=None) as (base, _):
         status, body = _post(
-            base, "/run_command",
+            base,
+            "/run_command",
             {"command": "pwd", "working_dir": str(weird_dir)},
         )
         assert status == 200
@@ -245,7 +254,9 @@ def test_oversized_max_bytes_no_longer_crashes_or_leaks_memory(agent_binary, tmp
     small_file.write_bytes(b"hello world")
     with running_agent(agent_binary, secret=None) as (base, proc):
         status, body = _get(base, f"/preview?path={small_file}&max_bytes=10000000000")
-        assert status == 200, f"expected clean 200 with clamped read, got {status}: {body}"
+        assert status == 200, (
+            f"expected clean 200 with clamped read, got {status}: {body}"
+        )
         result = json.loads(body)
         assert result["content"] == "hello world"
         # process must still be alive and responsive afterwards
@@ -253,7 +264,9 @@ def test_oversized_max_bytes_no_longer_crashes_or_leaks_memory(agent_binary, tmp
         assert status2 == 200, "process did not survive the oversized max_bytes request"
 
 
-def test_preview_of_binary_file_returns_invalid_utf8_over_the_wire(agent_binary, tmp_path):
+def test_preview_of_binary_file_returns_invalid_utf8_over_the_wire(
+    agent_binary, tmp_path
+):
     """Documents (does not "fix") a real quirk: h_preview's JSON escaping
     (Json::escape) does not escape or reject bytes >= 0x80, so raw
     non-UTF-8 bytes are copied straight into the JSON response body. This
@@ -322,7 +335,9 @@ def test_legitimate_secret_rotation_still_works_once_a_secret_exists(agent_binar
     config_dir = os.path.join(isolated_home, ".config", "organiser-agent")
     os.makedirs(config_dir, exist_ok=True)
     with open(os.path.join(config_dir, "machine.json"), "w") as f:
-        json.dump({"machine_id": "test-rotation", "secret": "file-bootstrapped-secret"}, f)
+        json.dump(
+            {"machine_id": "test-rotation", "secret": "file-bootstrapped-secret"}, f
+        )
 
     port = _free_port()
     env = os.environ.copy()
@@ -330,7 +345,9 @@ def test_legitimate_secret_rotation_still_works_once_a_secret_exists(agent_binar
     env["ORGANISER_PORT"] = str(port)
     env["HOME"] = isolated_home
     env["XDG_CONFIG_HOME"] = os.path.join(isolated_home, ".config")
-    proc = subprocess.Popen(agent_binary, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        agent_binary, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     try:
         base = f"http://127.0.0.1:{port}"
         for _ in range(50):
@@ -340,26 +357,38 @@ def test_legitimate_secret_rotation_still_works_once_a_secret_exists(agent_binar
                 pass
             except Exception:
                 if proc.poll() is not None:
-                    pytest.fail(f"organiser-agent exited early:\n{proc.stdout.read().decode(errors='replace')}")
+                    pytest.fail(
+                        f"organiser-agent exited early:\n{proc.stdout.read().decode(errors='replace')}"
+                    )
                 time.sleep(0.1)
                 continue
             break
         else:
             pytest.fail("organiser-agent never came up")
 
-        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        status, _ = _get(
+            base, "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"}
+        )
         assert status == 200, "file-bootstrapped secret should be active"
 
         status, body = _post(
-            base, "/config", {"secret": "rotated-secret"},
+            base,
+            "/config",
+            {"secret": "rotated-secret"},
             headers={"X-Organiser-Secret": "file-bootstrapped-secret"},
         )
-        assert status == 200, f"legitimate rotation should succeed, got {status}: {body!r}"
+        assert status == 200, (
+            f"legitimate rotation should succeed, got {status}: {body!r}"
+        )
 
-        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"})
+        status, _ = _get(
+            base, "/status", headers={"X-Organiser-Secret": "file-bootstrapped-secret"}
+        )
         assert status == 401, "old secret should no longer work after rotation"
 
-        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "rotated-secret"})
+        status, _ = _get(
+            base, "/status", headers={"X-Organiser-Secret": "rotated-secret"}
+        )
         assert status == 200, "new secret should work after rotation"
     finally:
         proc.kill()
@@ -374,8 +403,12 @@ def test_machine_name_change_unaffected_by_the_secret_bootstrap_guard(agent_bina
     secret configured yet."""
     with running_agent(agent_binary, secret=None) as (base, _):
         status, body = _post(base, "/config", {"machine_name": "my-desktop"})
-        assert status == 200, f"machine_name change should not be blocked, got {status}: {body!r}"
+        assert status == 200, (
+            f"machine_name change should not be blocked, got {status}: {body!r}"
+        )
         assert json.loads(body)["machine_name"] == "my-desktop"
+
+
 def test_unauthenticated_config_post_can_no_longer_hijack_the_machine(agent_binary):
     """FIXED (was: succeeded, HIGH severity). This is security-qa's
     original exploit test from before pc-agent's fix landed -- it used
@@ -412,15 +445,24 @@ def test_unauthenticated_config_post_can_no_longer_hijack_the_machine(agent_bina
 
         # the attacker's chosen secret was never persisted, so it
         # doesn't work anywhere
-        status, _ = _get(base, "/status", headers={"X-Organiser-Secret": "attacker-chosen-secret"})
+        status, _ = _get(
+            base, "/status", headers={"X-Organiser-Secret": "attacker-chosen-secret"}
+        )
         assert status == 200  # still open baseline, not "secret accepted"
 
 
 def test_config_endpoint_never_leaks_the_actual_secret_value(agent_binary):
     """Positive check: GET /config must report whether a secret is set
     and where it came from, but never the secret's actual value."""
-    with running_agent(agent_binary, secret="s3cr3t-value-should-not-leak") as (base, _):
-        status, body = _get(base, "/config", headers={"X-Organiser-Secret": "s3cr3t-value-should-not-leak"})
+    with running_agent(agent_binary, secret="s3cr3t-value-should-not-leak") as (
+        base,
+        _,
+    ):
+        status, body = _get(
+            base,
+            "/config",
+            headers={"X-Organiser-Secret": "s3cr3t-value-should-not-leak"},
+        )
         assert status == 200
         assert b"s3cr3t-value-should-not-leak" not in body
         assert b"secret_set" in body

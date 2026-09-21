@@ -51,6 +51,7 @@ from flask import Flask, jsonify, request, abort
 
 try:
     from send2trash import send2trash
+
     HAS_TRASH = True
 except ImportError:
     HAS_TRASH = False
@@ -76,6 +77,7 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
+
 
 def _check_auth():
     if not SECRET:
@@ -110,6 +112,7 @@ def _check_auth():
 #
 # This is deliberately just a file, not a database: one agent per machine,
 # low write frequency, no concurrent-writer story needed.
+
 
 def _config_dir() -> Path:
     if platform.system() == "Windows":
@@ -170,7 +173,9 @@ MACHINE_NAME = (
 # Same precedence for the secret: env var wins (so a service-managed
 # deployment isn't silently overridable from the local HTTP dashboard),
 # else whatever was last saved via /admin.
-SECRET = os.environ.get("ORGANISER_SECRET", "").strip() or _config.get("secret", "").strip()
+SECRET = (
+    os.environ.get("ORGANISER_SECRET", "").strip() or _config.get("secret", "").strip()
+)
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +193,7 @@ SECRET = os.environ.get("ORGANISER_SECRET", "").strip() or _config.get("secret",
 # statically checked for whether it touches a protected path. Closing that
 # off requires OS-level permissions (run the agent as a user without write
 # access to C:\Windows), not a string check here.
+
 
 def _windows_dir() -> Path:
     root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
@@ -214,15 +220,16 @@ def _reject_if_protected(*paths: Path):
     """Returns a Flask error response if any path is protected, else None."""
     for p in paths:
         if _is_protected_path(p):
-            return jsonify({
-                "error": f"Path is inside the protected Windows system directory: {p}"
-            }), 403
+            return jsonify(
+                {"error": f"Path is inside the protected Windows system directory: {p}"}
+            ), 403
     return None
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _human(size: int) -> str:
     for unit in ("B", "KB", "MB", "GB", "TB"):
@@ -240,7 +247,9 @@ def _entry_info(p: Path) -> dict:
             "path": str(p),
             "is_dir": p.is_dir(),
             "size_bytes": stat.st_size if p.is_file() else 0,
-            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(timespec="seconds"),
+            "modified": datetime.fromtimestamp(stat.st_mtime).isoformat(
+                timespec="seconds"
+            ),
             "extension": p.suffix.lower() if p.is_file() else "",
         }
     except PermissionError:
@@ -251,18 +260,21 @@ def _entry_info(p: Path) -> dict:
 # Routes
 # ---------------------------------------------------------------------------
 
+
 @app.get("/status")
 def status():
     _check_auth()
-    return jsonify({
-        "version": VERSION,
-        "platform": platform.system(),
-        "python": platform.python_version(),
-        "trash_available": HAS_TRASH,
-        "watched_folders": [],
-        "machine_id": MACHINE_ID,
-        "machine_name": MACHINE_NAME,
-    })
+    return jsonify(
+        {
+            "version": VERSION,
+            "platform": platform.system(),
+            "python": platform.python_version(),
+            "trash_available": HAS_TRASH,
+            "watched_folders": [],
+            "machine_id": MACHINE_ID,
+            "machine_name": MACHINE_NAME,
+        }
+    )
 
 
 @app.get("/list")
@@ -281,9 +293,17 @@ def list_files():
         return jsonify({"error": f"Not a directory: {folder}"}), 400
 
     if recursive:
-        entries = [_entry_info(child) for child in sorted(p.rglob("*")) if not child.name.startswith(".")]
+        entries = [
+            _entry_info(child)
+            for child in sorted(p.rglob("*"))
+            if not child.name.startswith(".")
+        ]
     else:
-        entries = [_entry_info(child) for child in sorted(p.iterdir()) if not child.name.startswith(".")]
+        entries = [
+            _entry_info(child)
+            for child in sorted(p.iterdir())
+            if not child.name.startswith(".")
+        ]
 
     return jsonify({"folder": str(p), "entries": entries})
 
@@ -327,9 +347,11 @@ def delete_file():
         return jsonify({"message": f"Permanently deleted '{path}'"})
     else:
         if not HAS_TRASH:
-            return jsonify({
-                "error": "send2trash not installed. Run: pip install send2trash, or pass permanent=true"
-            }), 500
+            return jsonify(
+                {
+                    "error": "send2trash not installed. Run: pip install send2trash, or pass permanent=true"
+                }
+            ), 500
         send2trash(str(path))
         return jsonify({"message": f"Sent '{path}' to Recycle Bin / Trash"})
 
@@ -377,10 +399,14 @@ def disk_usage():
                 continue
             try:
                 if child.is_dir():
-                    size = sum(f.stat().st_size for f in child.rglob("*") if f.is_file())
+                    size = sum(
+                        f.stat().st_size for f in child.rglob("*") if f.is_file()
+                    )
                 else:
                     size = child.stat().st_size
-                items.append({"path": str(child), "size_bytes": size, "size_human": _human(size)})
+                items.append(
+                    {"path": str(child), "size_bytes": size, "size_human": _human(size)}
+                )
                 total += size
             except (PermissionError, OSError):
                 continue
@@ -388,13 +414,21 @@ def disk_usage():
         return jsonify({"error": str(e)}), 403
 
     items.sort(key=lambda x: x["size_bytes"], reverse=True)
-    return jsonify({"folder": str(folder), "items": items, "total_bytes": total, "total_human": _human(total)})
+    return jsonify(
+        {
+            "folder": str(folder),
+            "items": items,
+            "total_bytes": total,
+            "total_human": _human(total),
+        }
+    )
 
 
 @app.post("/run_command")
 def run_command():
     _check_auth()
     import subprocess
+
     body = request.get_json(force=True)
     command = body.get("command", "")
     working_dir = body.get("working_dir", None) or None
@@ -418,7 +452,11 @@ def run_command():
         shell_args = ["/bin/bash", "-c", command]
 
     if working_dir is not None and not os.path.isdir(working_dir):
-        return jsonify({"error": f"working_dir does not exist or is not a directory: {working_dir}"}), 400
+        return jsonify(
+            {
+                "error": f"working_dir does not exist or is not a directory: {working_dir}"
+            }
+        ), 400
 
     try:
         result = subprocess.run(
@@ -428,11 +466,13 @@ def run_command():
             text=True,
             timeout=timeout_s,
         )
-        return jsonify({
-            "returncode": result.returncode,
-            "stdout": result.stdout[-8000:],  # cap output
-            "stderr": result.stderr[-2000:],
-        })
+        return jsonify(
+            {
+                "returncode": result.returncode,
+                "stdout": result.stdout[-8000:],  # cap output
+                "stderr": result.stderr[-2000:],
+            }
+        )
     except subprocess.TimeoutExpired:
         return jsonify({"error": f"Command timed out after {timeout_s}s"}), 408
     except FileNotFoundError as e:
@@ -469,15 +509,17 @@ def find_duplicates():
             continue
         size = files[0].stat().st_size
         wasted = size * (len(files) - 1)
-        groups.append({
-            "hash": h,
-            "count": len(files),
-            "size_bytes": size,
-            "size_human": _human(size),
-            "wasted_bytes": wasted,
-            "wasted_human": _human(wasted),
-            "files": [str(f) for f in files],
-        })
+        groups.append(
+            {
+                "hash": h,
+                "count": len(files),
+                "size_bytes": size,
+                "size_human": _human(size),
+                "wasted_bytes": wasted,
+                "wasted_human": _human(wasted),
+                "files": [str(f) for f in files],
+            }
+        )
 
     groups.sort(key=lambda x: x["wasted_bytes"], reverse=True)
     return jsonify({"folder": str(folder), "groups": groups})
@@ -486,6 +528,7 @@ def find_duplicates():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 @app.post("/screenshot")
 def screenshot():
@@ -505,6 +548,7 @@ def screenshot():
     # 1. Try PIL (Pillow)
     try:
         import PIL.ImageGrab as _ig
+
         img = _ig.grab()
         buf = io.BytesIO()
         img.save(buf, format="PNG")
@@ -514,6 +558,7 @@ def screenshot():
         # 2. Fallback to mss
         try:
             import mss, mss.tools
+
             with mss.mss() as sct:
                 # Use primary monitor (1) if available, fallback to total desktop (0)
                 monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
@@ -521,7 +566,9 @@ def screenshot():
                 img_bytes = mss.tools.to_png(raw.rgb, raw.size)
                 size_str = f"{raw.size[0]}x{raw.size[1]}"
         except ImportError:
-            return jsonify({"error": "No screenshot library found. Install pillow or mss."}), 500
+            return jsonify(
+                {"error": "No screenshot library found. Install pillow or mss."}
+            ), 500
         except Exception as e:
             return jsonify({"error": f"MSS capture failed: {e}"}), 500
     except Exception as e:
@@ -535,13 +582,16 @@ def screenshot():
             p.write_bytes(img_bytes)
 
         b64 = base64.b64encode(img_bytes).decode("ascii")
-        return jsonify({
-            "image_base64": b64,
-            "size": size_str,
-            "saved_path": save_path if save_path else None,
-        })
+        return jsonify(
+            {
+                "image_base64": b64,
+                "size": size_str,
+                "saved_path": save_path if save_path else None,
+            }
+        )
     except Exception as e:
         return jsonify({"error": f"Failed saving image or encoding response: {e}"}), 500
+
 
 @app.post("/write_file")
 def write_file():
@@ -554,6 +604,7 @@ def write_file():
     # coordination/status/pc-agent.md and BROADCAST [0006].
     _check_auth()
     import base64
+
     body = request.get_json(force=True)
     path = Path(body.get("path", "")).expanduser()
     if not path or str(path) in (".", ""):
@@ -587,6 +638,7 @@ def read_file_b64():
     # can move binaries to/from a PC without corruption.
     _check_auth()
     import base64
+
     path = Path(request.args.get("path", "")).expanduser()
     requested = int(request.args.get("max_bytes", 10 * 1024 * 1024))  # 10MB default
 
@@ -604,13 +656,15 @@ def read_file_b64():
         with open(path, "rb") as f:
             raw = f.read(max_bytes)
         truncated = size > len(raw)
-        return jsonify({
-            "path": str(path),
-            "content_b64": base64.b64encode(raw).decode("ascii"),
-            "size_bytes": size,
-            "returned_bytes": len(raw),
-            "truncated": truncated,
-        })
+        return jsonify(
+            {
+                "path": str(path),
+                "content_b64": base64.b64encode(raw).decode("ascii"),
+                "size_bytes": size,
+                "returned_bytes": len(raw),
+                "truncated": truncated,
+            }
+        )
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -627,18 +681,21 @@ def read_file_b64():
 # routes (setting or changing the secret still requires already being able
 # to reach this port, exactly like every other endpoint).
 
+
 @app.get("/config")
 def get_config():
     _check_auth()
-    return jsonify({
-        "machine_id": MACHINE_ID,
-        "machine_name": MACHINE_NAME,
-        "secret_set": bool(SECRET),
-        "secret_source": "env" if os.environ.get("ORGANISER_SECRET", "").strip() else (
-            "config_file" if SECRET else "none"
-        ),
-        "config_path": str(_MACHINE_CONFIG_PATH),
-    })
+    return jsonify(
+        {
+            "machine_id": MACHINE_ID,
+            "machine_name": MACHINE_NAME,
+            "secret_set": bool(SECRET),
+            "secret_source": "env"
+            if os.environ.get("ORGANISER_SECRET", "").strip()
+            else ("config_file" if SECRET else "none"),
+            "config_path": str(_MACHINE_CONFIG_PATH),
+        }
+    )
 
 
 @app.post("/config")
@@ -670,16 +727,18 @@ def update_config():
     if "secret" in body:
         new_secret = str(body["secret"])
         if not SECRET and new_secret:
-            return jsonify({
-                "error": (
-                    "Cannot set the initial secret via /config over the network -- "
-                    "this would let anyone who reaches this port before you do "
-                    "permanently lock you out (SECURITY_FINDINGS.md finding 20). "
-                    f"Set ORGANISER_SECRET as an environment variable (then restart), "
-                    f"or edit {_MACHINE_CONFIG_PATH} directly on this machine. "
-                    "Once a secret exists, /config can rotate it normally."
-                )
-            }), 403
+            return jsonify(
+                {
+                    "error": (
+                        "Cannot set the initial secret via /config over the network -- "
+                        "this would let anyone who reaches this port before you do "
+                        "permanently lock you out (SECURITY_FINDINGS.md finding 20). "
+                        f"Set ORGANISER_SECRET as an environment variable (then restart), "
+                        f"or edit {_MACHINE_CONFIG_PATH} directly on this machine. "
+                        "Once a secret exists, /config can rotate it normally."
+                    )
+                }
+            ), 403
         # Empty string is allowed here — it means "remove the secret",
         # matching the existing semantics of ORGANISER_SECRET unset.
         # (This guard only blocks empty->non-empty; non-empty->empty and
@@ -688,19 +747,30 @@ def update_config():
         updates["secret"] = new_secret
 
     if not updates:
-        return jsonify({"error": "Nothing to update. Send machine_name and/or secret."}), 400
+        return jsonify(
+            {"error": "Nothing to update. Send machine_name and/or secret."}
+        ), 400
 
     _save_config(updates)
 
     # Hot-reload in-memory values so the change takes effect immediately,
     # without restarting the agent — UNLESS an env var is set for that
     # field, in which case the env var still wins (documented precedence).
-    if "machine_name" in updates and not os.environ.get("ORGANISER_MACHINE_NAME", "").strip():
+    if (
+        "machine_name" in updates
+        and not os.environ.get("ORGANISER_MACHINE_NAME", "").strip()
+    ):
         MACHINE_NAME = updates["machine_name"]
     if "secret" in updates and not os.environ.get("ORGANISER_SECRET", "").strip():
         SECRET = updates["secret"]
 
-    return jsonify({"message": "Config updated", "machine_name": MACHINE_NAME, "secret_set": bool(SECRET)})
+    return jsonify(
+        {
+            "message": "Config updated",
+            "machine_name": MACHINE_NAME,
+            "secret_set": bool(SECRET),
+        }
+    )
 
 
 @app.get("/admin")
@@ -770,8 +840,12 @@ if __name__ == "__main__":
     print(f"  Organiser Agent v{VERSION}")
     print(f"  Platform : {platform.system()} {platform.release()}")
     print(f"  Machine  : {MACHINE_NAME} ({MACHINE_ID})")
-    print(f"  Trash    : {'✅ send2trash available' if HAS_TRASH else '⚠️  install send2trash for safe deletes'}")
-    print(f"  Auth     : {'🔒 secret set' if SECRET else '⚠️  no secret — anyone with the URL can access'}")
+    print(
+        f"  Trash    : {'✅ send2trash available' if HAS_TRASH else '⚠️  install send2trash for safe deletes'}"
+    )
+    print(
+        f"  Auth     : {'🔒 secret set' if SECRET else '⚠️  no secret — anyone with the URL can access'}"
+    )
     print(f"  Listening: http://localhost:{PORT}")
     print()
     print("  Next steps:")

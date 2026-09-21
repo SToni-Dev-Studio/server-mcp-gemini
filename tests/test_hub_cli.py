@@ -16,6 +16,7 @@ real (if minimal) local HTTP server -- not a mocked urllib.request.Request
 call -- so these tests catch real bugs in URL construction, header
 formatting, and JSON body shape, not just "was some function called".
 """
+
 import json
 import os
 import subprocess
@@ -35,7 +36,11 @@ def run_cli(args, env_overrides=None, cwd=None):
     env = dict(os.environ)
     env.update(env_overrides or {})
     return subprocess.run(
-        [sys.executable, str(SCRIPT), *args], env=env, capture_output=True, text=True, timeout=15
+        [sys.executable, str(SCRIPT), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
 
 
@@ -61,7 +66,9 @@ def test_root_is_actually_enforced_without_the_test_bypass(tmp_path):
     is incapable of triggering would be meaningless, not a real
     verification."""
     if os.geteuid() == 0:
-        pytest.skip("this test process is itself root, so _require_root() cannot be exercised as non-root here")
+        pytest.skip(
+            "this test process is itself root, so _require_root() cannot be exercised as non-root here"
+        )
     env = {
         "HUB_CLI_PC_TUNNEL_DIR": str(tmp_path / "pc-tunnel"),
         "HUB_CLI_CONFIG_PATH": str(tmp_path / "hub-cli-config.json"),
@@ -76,6 +83,7 @@ def test_root_is_actually_enforced_without_the_test_bypass(tmp_path):
 # pc list / add / remove -- real subprocess, real filesystem (isolated tmp_path)
 # ---------------------------------------------------------------------------
 
+
 def test_pc_list_empty(isolated_env):
     r = run_cli(["pc", "list"], isolated_env)
     assert r.returncode == 0
@@ -83,7 +91,9 @@ def test_pc_list_empty(isolated_env):
 
 
 def test_pc_add_writes_conf_file(isolated_env, tmp_path):
-    r = run_cli(["pc", "add", "desktop", "192.168.1.50", "--port", "7842"], isolated_env)
+    r = run_cli(
+        ["pc", "add", "desktop", "192.168.1.50", "--port", "7842"], isolated_env
+    )
     assert "Wrote" in r.stdout
     conf = tmp_path / "pc-tunnel" / "desktop.conf"
     assert conf.exists()
@@ -147,7 +157,9 @@ def test_pc_pin_nonexistent_pc_fails_cleanly(isolated_env):
 
 
 def test_pc_pin_unreachable_ip_fails_cleanly(isolated_env):
-    run_cli(["pc", "add", "unreachable", "192.0.2.1"], isolated_env)  # TEST-NET-1, guaranteed unroutable
+    run_cli(
+        ["pc", "add", "unreachable", "192.0.2.1"], isolated_env
+    )  # TEST-NET-1, guaranteed unroutable
     r = run_cli(["pc", "pin", "unreachable"], isolated_env)
     assert r.returncode != 0
     assert "ssh-keyscan" in r.stderr
@@ -157,6 +169,7 @@ def test_pc_pin_unreachable_ip_fails_cleanly(isolated_env):
 # config show / set-render-credentials -- real subprocess, real filesystem
 # ---------------------------------------------------------------------------
 
+
 def test_config_show_before_any_setup(isolated_env):
     r = run_cli(["config", "show"], isolated_env)
     assert r.returncode == 0
@@ -165,7 +178,14 @@ def test_config_show_before_any_setup(isolated_env):
 
 def test_config_set_render_credentials_persists_with_0600(isolated_env, tmp_path):
     r = run_cli(
-        ["config", "set-render-credentials", "--api-key", "secret123", "--service-id", "srv-abc"],
+        [
+            "config",
+            "set-render-credentials",
+            "--api-key",
+            "secret123",
+            "--service-id",
+            "srv-abc",
+        ],
         isolated_env,
     )
     assert r.returncode == 0
@@ -178,7 +198,10 @@ def test_config_set_render_credentials_persists_with_0600(isolated_env, tmp_path
 
 
 def test_config_show_never_prints_the_actual_secret_value(isolated_env):
-    run_cli(["config", "set-render-credentials", "--api-key", "supersecretvalue123"], isolated_env)
+    run_cli(
+        ["config", "set-render-credentials", "--api-key", "supersecretvalue123"],
+        isolated_env,
+    )
     r = run_cli(["config", "show"], isolated_env)
     assert "supersecretvalue123" not in r.stdout
     assert "set" in r.stdout  # just confirms presence, not the value
@@ -187,6 +210,7 @@ def test_config_show_never_prints_the_actual_secret_value(isolated_env):
 # ---------------------------------------------------------------------------
 # render get/set/deploy -- real subprocess, real local HTTP server (not mocked)
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def fake_render_server():
@@ -258,14 +282,26 @@ def test_render_get_without_credentials_fails_cleanly(isolated_env):
     assert "credentials not configured" in r.stderr
 
 
-def test_render_credentials_can_come_from_saved_config_not_just_env(fake_render_server, isolated_env):
+def test_render_credentials_can_come_from_saved_config_not_just_env(
+    fake_render_server, isolated_env
+):
     # Save credentials via `config set-render-credentials` first, then
     # confirm `render get` picks them up WITHOUT any RENDER_API_KEY /
     # RENDER_SERVICE_ID env vars set -- this is the whole point of
     # config set-render-credentials existing (so you don't have to pass
     # secrets as env vars / CLI args every single invocation).
     env = {**isolated_env, "HUB_CLI_RENDER_API": "http://127.0.0.1:18091"}
-    run_cli(["config", "set-render-credentials", "--api-key", "test-key-abc", "--service-id", "srv-test"], env)
+    run_cli(
+        [
+            "config",
+            "set-render-credentials",
+            "--api-key",
+            "test-key-abc",
+            "--service-id",
+            "srv-test",
+        ],
+        env,
+    )
     r = run_cli(["render", "get", "MCP_SERVER_PASSWORD"], env)
     assert r.returncode == 0
     assert r.stdout.strip() == "supersecret"
@@ -274,6 +310,7 @@ def test_render_credentials_can_come_from_saved_config_not_just_env(fake_render_
 # ---------------------------------------------------------------------------
 # argument parsing sanity
 # ---------------------------------------------------------------------------
+
 
 def test_no_subcommand_fails_with_usage(isolated_env):
     r = run_cli([], isolated_env)

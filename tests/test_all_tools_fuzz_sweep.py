@@ -21,6 +21,7 @@ verified no /tmp/PWNED_* marker files were ever created). This test
 locks in a trimmed-for-speed version of that same sweep as a permanent
 regression check.
 """
+
 import json
 import os
 import re
@@ -34,7 +35,7 @@ import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-MOCKED_RUNNER = '''
+MOCKED_RUNNER = """
 import os, sys
 os.environ["MCP_SERVER_PASSWORD"] = "test-password-123"
 for k in ("RENDER_EXTERNAL_HOSTNAME", "MCP_ALLOWED_HOST", "FLY_APP_NAME"):
@@ -76,7 +77,7 @@ _httpx.AsyncClient = _BlockedAsyncClient
 
 import uvicorn
 uvicorn.run(server.app, host="127.0.0.1", port=__PORT__, log_level="warning")
-'''
+"""
 
 # Trimmed for test-suite speed -- the full engagement run used ~19
 # payloads; this keeps the highest-value ones from each category.
@@ -133,9 +134,13 @@ def _extract_json(text):
 def mocked_server(tmp_path):
     port = _free_port()
     runner = tmp_path / "run_mocked.py"
-    script = MOCKED_RUNNER.replace("__PORT__", str(port)).replace("__REPO_ROOT__", REPO_ROOT)
+    script = MOCKED_RUNNER.replace("__PORT__", str(port)).replace(
+        "__REPO_ROOT__", REPO_ROOT
+    )
     runner.write_text(script)
-    proc = subprocess.Popen([sys.executable, str(runner)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        [sys.executable, str(runner)], stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     base = f"http://127.0.0.1:{port}/mcp"
     try:
         for _ in range(50):
@@ -159,12 +164,13 @@ def test_no_pwned_marker_files_exist_before_sweep():
     """Sanity check the fixture actually blocks real execution -- these
     markers must never exist from a previous accidental real run."""
     import glob
+
     leftover = glob.glob("/tmp/PWNED_PYTEST_FUZZ*")
     for f in leftover:
         os.remove(f)  # clean slate; a leftover from a genuinely broken
-                       # mock in a prior run would be a real finding, but
-                       # stale files from an interrupted run shouldn't
-                       # fail this specific assertion
+        # mock in a prior run would be a real finding, but
+        # stale files from an interrupted run shouldn't
+        # fail this specific assertion
     assert True
 
 
@@ -178,22 +184,45 @@ def test_systematic_fuzz_sweep_across_all_tools(mocked_server):
     }
 
     with httpx.Client(timeout=15) as client:
-        r = client.post(base, headers=headers_base, json={
-            "jsonrpc": "2.0", "id": 1, "method": "initialize",
-            "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "fuzz", "version": "1"}},
-        })
+        r = client.post(
+            base,
+            headers=headers_base,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "fuzz", "version": "1"},
+                },
+            },
+        )
         sid = r.headers.get("Mcp-Session-Id")
         assert sid, f"no session id: {r.status_code} {r.text[:300]}"
         headers = dict(headers_base)
         headers["Mcp-Session-Id"] = sid
-        client.post(base, headers=headers, json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+        client.post(
+            base,
+            headers=headers,
+            json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+        )
 
-        list_resp = client.post(base, headers=headers, json={
-            "jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {},
-        })
+        list_resp = client.post(
+            base,
+            headers=headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/list",
+                "params": {},
+            },
+        )
         parsed = _extract_json(list_resp.text)
         tools = parsed["result"]["tools"]
-        assert len(tools) >= 20, "expected the real tool surface, got suspiciously few tools"
+        assert len(tools) >= 20, (
+            "expected the real tool surface, got suspiciously few tools"
+        )
 
         findings = []
         total_calls = 0
@@ -215,32 +244,50 @@ def test_systematic_fuzz_sweep_across_all_tools(mocked_server):
                     call_id += 1
                     total_calls += 1
                     try:
-                        r = client.post(base, headers=headers, json={
-                            "jsonrpc": "2.0", "id": call_id, "method": "tools/call",
-                            "params": {"name": name, "arguments": args},
-                        }, timeout=10)
+                        r = client.post(
+                            base,
+                            headers=headers,
+                            json={
+                                "jsonrpc": "2.0",
+                                "id": call_id,
+                                "method": "tools/call",
+                                "params": {"name": name, "arguments": args},
+                            },
+                            timeout=10,
+                        )
                     except Exception as e:
-                        findings.append(f"{name}.{param} EXCEPTION calling: {type(e).__name__}: {e}")
+                        findings.append(
+                            f"{name}.{param} EXCEPTION calling: {type(e).__name__}: {e}"
+                        )
                         continue
 
                     if r.status_code != 200:
-                        findings.append(f"{name}.{param} HTTP {r.status_code}: {r.text[:200]}")
+                        findings.append(
+                            f"{name}.{param} HTTP {r.status_code}: {r.text[:200]}"
+                        )
                         continue
 
                     result = _extract_json(r.text)
                     if result is None:
-                        findings.append(f"{name}.{param} response was not valid JSON: {r.text[:200]}")
+                        findings.append(
+                            f"{name}.{param} response was not valid JSON: {r.text[:200]}"
+                        )
                         continue
 
                     text_repr = json.dumps(result)
                     if "Traceback (most recent call last)" in text_repr:
-                        findings.append(f"{name}.{param} LEAKED PYTHON TRACEBACK: {text_repr[:300]}")
+                        findings.append(
+                            f"{name}.{param} LEAKED PYTHON TRACEBACK: {text_repr[:300]}"
+                        )
 
     import glob
+
     pwned = glob.glob("/tmp/PWNED_PYTEST_FUZZ*")
     for f in pwned:
         os.remove(f)
 
-    assert total_calls > 50, f"sweep only made {total_calls} calls -- fixture or schema discovery is probably broken"
+    assert total_calls > 50, (
+        f"sweep only made {total_calls} calls -- fixture or schema discovery is probably broken"
+    )
     assert not pwned, f"a mock was bypassed and real command injection fired: {pwned}"
     assert not findings, "fuzz sweep found issues:\n" + "\n".join(findings[:20])

@@ -6,6 +6,7 @@ session -- GITHUB_TOKEN, MCP_SERVER_PASSWORD, SSH_PRIVATE_KEY, everything.
 Any admin-cookie leak (XSS, shared screen, browser extension, screenshot)
 turned into a full credential compromise, not just dashboard access.
 """
+
 import os
 import sys
 
@@ -16,8 +17,13 @@ import server as srv
 
 
 def test_mask_secret_value_keeps_last_4_only():
-    fake_token = "ghp_ExampleFakeTokenForTestOnlyNotReal12"  # synthetic, not a real credential
-    assert srv._mask_secret_value(fake_token) == "*" * (len(fake_token) - 4) + fake_token[-4:]
+    fake_token = (
+        "ghp_ExampleFakeTokenForTestOnlyNotReal12"  # synthetic, not a real credential
+    )
+    assert (
+        srv._mask_secret_value(fake_token)
+        == "*" * (len(fake_token) - 4) + fake_token[-4:]
+    )
 
 
 def test_mask_secret_value_short_string_fully_masked():
@@ -46,7 +52,9 @@ def test_admin_api_env_get_never_returns_a_plaintext_value(monkeypatch):
     import asyncio
     from unittest.mock import AsyncMock, patch, MagicMock
 
-    monkeypatch.setattr(srv, "_require_admin", lambda request: None)  # simulate authenticated
+    monkeypatch.setattr(
+        srv, "_require_admin", lambda request: None
+    )  # simulate authenticated
     monkeypatch.setattr(srv, "RENDER_API_KEY", "fake-key-for-test")
     monkeypatch.setattr(srv, "RENDER_SERVICE_ID", "srv-fake")
 
@@ -72,6 +80,7 @@ def test_admin_api_env_get_never_returns_a_plaintext_value(monkeypatch):
         response = asyncio.run(srv._admin_api_env_get(fake_request))
 
     import json
+
     body = json.loads(response.body)
     returned_values = [v["value"] for v in body["vars"]]
 

@@ -30,6 +30,7 @@ The real security boundary for this tool is the same one gating every
 other tool: the bearer-token auth on /mcp, already covered by
 tests/test_server_auth_and_injection.py.
 """
+
 import importlib
 import os
 import sys
@@ -41,8 +42,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 def _fresh_server(env_overrides: dict):
     for k in [
-        "MCP_SERVER_PASSWORD", "ADMIN_PASSWORD", "ADMIN_COOKIE_SECRET",
-        "RENDER_EXTERNAL_HOSTNAME", "MCP_ALLOWED_HOST", "FLY_APP_NAME", "PORT",
+        "MCP_SERVER_PASSWORD",
+        "ADMIN_PASSWORD",
+        "ADMIN_COOKIE_SECRET",
+        "RENDER_EXTERNAL_HOSTNAME",
+        "MCP_ALLOWED_HOST",
+        "FLY_APP_NAME",
+        "PORT",
     ]:
         os.environ.pop(k, None)
     os.environ.update(env_overrides)
@@ -66,7 +72,14 @@ def srv_with_captured_ssh():
     return srv, captured
 
 
-EXACT_BLOCKED_PATTERNS = ["rm -rf /", "mkfs", "dd if=", "> /dev/sda", "shutdown now", "halt"]
+EXACT_BLOCKED_PATTERNS = [
+    "rm -rf /",
+    "mkfs",
+    "dd if=",
+    "> /dev/sda",
+    "shutdown now",
+    "halt",
+]
 
 
 @pytest.mark.parametrize("pattern", EXACT_BLOCKED_PATTERNS)
@@ -80,7 +93,9 @@ async def test_exact_blocked_pattern_is_blocked(srv_with_captured_ssh, pattern):
 
 @pytest.mark.parametrize("pattern", EXACT_BLOCKED_PATTERNS)
 @pytest.mark.asyncio
-async def test_blocked_pattern_still_blocked_when_embedded_in_a_longer_command(srv_with_captured_ssh, pattern):
+async def test_blocked_pattern_still_blocked_when_embedded_in_a_longer_command(
+    srv_with_captured_ssh, pattern
+):
     """The denylist is a substring check, so it should catch the pattern
     anywhere in a longer command line, not just as the whole command."""
     srv, captured = srv_with_captured_ssh
@@ -94,7 +109,9 @@ async def test_ordinary_safe_command_passes_through_unmodified(srv_with_captured
     srv, captured = srv_with_captured_ssh
     result = await srv.server_run_command("ls -la /home")
     assert result == "MOCKED_OUTPUT"
-    assert captured == ["ls -la /home"], "command must reach _ssh_server verbatim -- no extra escaping/wrapping here (that's _ssh_server's job)"
+    assert captured == ["ls -la /home"], (
+        "command must reach _ssh_server verbatim -- no extra escaping/wrapping here (that's _ssh_server's job)"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -105,13 +122,16 @@ async def test_ordinary_safe_command_passes_through_unmodified(srv_with_captured
 # rather than silently stale.
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_denylist_bypassed_by_extra_whitespace(srv_with_captured_ssh):
     srv, captured = srv_with_captured_ssh
     # Two spaces instead of one -- "rm -rf /" (one space) is the literal
     # denylist entry, "rm  -rf /" doesn't contain that exact substring.
     result = await srv.server_run_command("rm  -rf /")
-    assert result == "MOCKED_OUTPUT", "confirms the denylist is a literal substring match, easily varied around -- matches its own docstring's honesty about this"
+    assert result == "MOCKED_OUTPUT", (
+        "confirms the denylist is a literal substring match, easily varied around -- matches its own docstring's honesty about this"
+    )
     assert captured == ["rm  -rf /"]
 
 
@@ -134,12 +154,16 @@ async def test_denylist_bypassed_by_different_target_path(srv_with_captured_ssh)
     # contain that literal substring, e.g. using bs=/of= ordering tricks
     # is unnecessary -- the destructive part here doesn't even need "if=":
     result = await srv.server_run_command("dd of=/dev/sda bs=1M count=100 </dev/zero")
-    assert result == "MOCKED_OUTPUT", "no 'if=' or '> /dev/sda' substring present, so this destructive dd invocation is NOT caught -- confirms the denylist is footgun-prevention only, as documented, not a real boundary"
+    assert result == "MOCKED_OUTPUT", (
+        "no 'if=' or '> /dev/sda' substring present, so this destructive dd invocation is NOT caught -- confirms the denylist is footgun-prevention only, as documented, not a real boundary"
+    )
     assert captured == ["dd of=/dev/sda bs=1M count=100 </dev/zero"]
 
 
 @pytest.mark.asyncio
-async def test_command_containing_shell_metacharacters_passed_through_verbatim(srv_with_captured_ssh):
+async def test_command_containing_shell_metacharacters_passed_through_verbatim(
+    srv_with_captured_ssh,
+):
     """This tool's entire purpose is running arbitrary shell commands over
     SSH -- unlike organiser-agent.cpp's working_dir bug (a DIFFERENT
     parameter being unsafely concatenated INTO a shell string), `command`

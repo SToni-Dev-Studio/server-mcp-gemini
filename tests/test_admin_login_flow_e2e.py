@@ -14,6 +14,7 @@ ADMIN_PASSWORD is unset (regression coverage for the finding fixed in
 test_admin_cookie_auth.py, but exercised here through real HTTP instead
 of direct function calls).
 """
+
 import os
 import sys
 import importlib
@@ -31,13 +32,19 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _fresh_app(**env_overrides):
-    for k in ("ADMIN_PASSWORD", "MCP_SERVER_PASSWORD", "ADMIN_COOKIE_SECRET",
-              "RENDER_API_KEY", "RENDER_SERVICE_ID"):
+    for k in (
+        "ADMIN_PASSWORD",
+        "MCP_SERVER_PASSWORD",
+        "ADMIN_COOKIE_SECRET",
+        "RENDER_API_KEY",
+        "RENDER_SERVICE_ID",
+    ):
         os.environ.pop(k, None)
     os.environ.setdefault("PORT", "8000")
     for k, v in env_overrides.items():
         os.environ[k] = v
     import server as srv
+
     importlib.reload(srv)
     return srv
 
@@ -52,7 +59,11 @@ def test_full_login_cookie_authenticated_request_flow():
     assert "admin_session" not in r.cookies
 
     # correct password -> redirect + cookie issued
-    r = client.post("/admin/login", data={"password": "correct-horse-battery-staple"}, follow_redirects=False)
+    r = client.post(
+        "/admin/login",
+        data={"password": "correct-horse-battery-staple"},
+        follow_redirects=False,
+    )
     assert r.status_code == 303
     assert "admin_session" in r.cookies
     cookie_attrs = r.headers.get("set-cookie", "")
@@ -83,6 +94,7 @@ def test_login_flow_with_env_configured_returns_masked_values():
     client.post("/admin/login", data={"password": "correct-horse-battery-staple"})
 
     from unittest.mock import AsyncMock, patch, MagicMock
+
     real_secret = "ghp_realproductiontoken1234567890abcdef"
     fake_items = [{"envVar": {"key": "GITHUB_TOKEN", "value": real_secret}}]
     fake_response = MagicMock()
@@ -98,8 +110,12 @@ def test_login_flow_with_env_configured_returns_masked_values():
     assert r.status_code == 200
     body = r.json()
     values = [v["value"] for v in body["vars"]]
-    assert real_secret not in values, "real secret reached the client through the full real HTTP flow"
-    assert any(v.endswith("cdef") for v in values), "masked value should still show last 4 chars"
+    assert real_secret not in values, (
+        "real secret reached the client through the full real HTTP flow"
+    )
+    assert any(v.endswith("cdef") for v in values), (
+        "masked value should still show last 4 chars"
+    )
 
 
 def test_no_cookie_at_all_is_rejected():
@@ -147,15 +163,22 @@ def test_whole_admin_flow_fails_closed_when_unconfigured():
     srv = _fresh_app()  # no ADMIN_PASSWORD, no ADMIN_COOKIE_SECRET
     client = TestClient(srv.app, base_url=TEST_BASE_URL)
 
-    r = client.post("/admin/login", data={"password": "anything"}, follow_redirects=False)
+    r = client.post(
+        "/admin/login", data={"password": "anything"}, follow_redirects=False
+    )
     assert r.status_code in (401, 503)
 
     # forge a cookie with the OLD known hardcoded fallback secret and try it anyway
     import hmac, hashlib, time
+
     old_leaked_secret = "insecure-dev-secret-set-ADMIN_PASSWORD"
     expiry = str(int(time.time()) + 3600)
-    forged_sig = hmac.new(old_leaked_secret.encode(), expiry.encode(), hashlib.sha256).hexdigest()
+    forged_sig = hmac.new(
+        old_leaked_secret.encode(), expiry.encode(), hashlib.sha256
+    ).hexdigest()
     client.cookies.set("admin_session", f"{expiry}.{forged_sig}")
 
     r = client.get("/admin/api/env")
-    assert r.status_code == 401, "forged cookie must be rejected even through the real route"
+    assert r.status_code == 401, (
+        "forged cookie must be rejected even through the real route"
+    )

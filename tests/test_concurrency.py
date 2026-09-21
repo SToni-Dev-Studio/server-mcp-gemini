@@ -24,6 +24,7 @@ sessions correctly) -- that needs live infrastructure, which is out of
 scope for this sandbox-only engagement. See SECURITY_FINDINGS.md and
 coordination/status/security-qa.md for that caveat stated plainly.
 """
+
 import asyncio
 import base64
 import importlib
@@ -36,7 +37,13 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 def _fresh_server():
-    for k in ["MCP_SERVER_PASSWORD", "RENDER_EXTERNAL_HOSTNAME", "MCP_ALLOWED_HOST", "FLY_APP_NAME", "PORT"]:
+    for k in [
+        "MCP_SERVER_PASSWORD",
+        "RENDER_EXTERNAL_HOSTNAME",
+        "MCP_ALLOWED_HOST",
+        "FLY_APP_NAME",
+        "PORT",
+    ]:
         os.environ.pop(k, None)
     os.environ["PORT"] = "18000"
     if "server" in sys.modules:
@@ -76,7 +83,9 @@ async def test_concurrent_writes_to_different_paths_never_cross_contaminate():
 
     for i, marker, path, result in results:
         expected_b64 = base64.b64encode(marker.encode()).decode()
-        assert expected_b64 in result, f"call {i}'s own content missing from its own result"
+        assert expected_b64 in result, (
+            f"call {i}'s own content missing from its own result"
+        )
         assert path in result, f"call {i}'s own path missing from its own result"
         for j in range(N):
             if j == i:
@@ -125,6 +134,7 @@ def test_admin_env_set_writes_each_key_independently_not_read_modify_write():
     read-modify-write pattern would be vulnerable to lost updates under
     concurrent edits to different keys; a per-key PUT is not."""
     import inspect
+
     srv = _fresh_server()
     source = inspect.getsource(srv._admin_api_env_set)
     assert "env-vars/{key}" in source, (
@@ -134,6 +144,5 @@ def test_admin_env_set_writes_each_key_independently_not_read_modify_write():
         "this test"
     )
     assert "client.get" not in source, (
-        "env-set should not need to read the existing list before "
-        "writing a single key"
+        "env-set should not need to read the existing list before writing a single key"
     )

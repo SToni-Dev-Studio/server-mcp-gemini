@@ -21,6 +21,7 @@ should run a true end-to-end pc: transfer against real staging
 infrastructure once available; this file proves both halves work
 correctly in isolation, not that the full chain between them does.
 """
+
 import os
 import sys
 import shutil
@@ -52,7 +53,8 @@ def agent_binary(tmp_path_factory):
     out = str(tmp_path_factory.mktemp("bin") / "organiser-agent-e2e")
     subprocess.run(
         ["g++", "-std=c++17", "-O2", "-o", out, CPP_SRC, "-lpthread"],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     return out
 
@@ -71,7 +73,9 @@ def running_agent(binary_path):
     env = dict(os.environ)
     env["ORGANISER_PORT"] = str(port)
     env["ORGANISER_SECRET"] = ""
-    proc = subprocess.Popen([binary_path], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    proc = subprocess.Popen(
+        [binary_path], env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
+    )
     base = f"http://127.0.0.1:{port}"
     try:
         for _ in range(50):
@@ -89,7 +93,9 @@ def running_agent(binary_path):
         proc.wait(timeout=5)
 
 
-def test_organiser_agent_binary_endpoints_binary_roundtrip_SMALL_PAYLOAD(agent_binary, tmp_path):
+def test_organiser_agent_binary_endpoints_binary_roundtrip_SMALL_PAYLOAD(
+    agent_binary, tmp_path
+):
     """REAL HTTP against a real running binary. Confirms every one of 256
     distinct byte values survives a round trip through content_b64 /
     read_file_b64.
@@ -104,7 +110,9 @@ def test_organiser_agent_binary_endpoints_binary_roundtrip_SMALL_PAYLOAD(agent_b
     """
     with running_agent(agent_binary) as base:
         target = str(tmp_path / "roundtrip.bin")
-        binary_content = bytes(range(256)) * 100  # 25,600 bytes -- comfortably under the 64KB buffer
+        binary_content = (
+            bytes(range(256)) * 100
+        )  # 25,600 bytes -- comfortably under the 64KB buffer
         encoded = base64.b64encode(binary_content).decode("ascii")
 
         req = urllib.request.Request(
@@ -116,10 +124,14 @@ def test_organiser_agent_binary_endpoints_binary_roundtrip_SMALL_PAYLOAD(agent_b
         with urllib.request.urlopen(req, timeout=5) as resp:
             assert resp.status == 200
 
-        with urllib.request.urlopen(f"{base}/read_file_b64?path={target}", timeout=5) as resp:
+        with urllib.request.urlopen(
+            f"{base}/read_file_b64?path={target}", timeout=5
+        ) as resp:
             body = json.loads(resp.read())
         readback = base64.b64decode(body["content_b64"])
-        assert readback == binary_content, "binary content corrupted by the agent's own endpoints"
+        assert readback == binary_content, (
+            "binary content corrupted by the agent's own endpoints"
+        )
         assert body["truncated"] is False
 
 
@@ -145,7 +157,9 @@ def test_organiser_agent_no_longer_has_the_64kb_truncation_bug(agent_binary, tmp
     """
     with running_agent(agent_binary) as base:
         target = str(tmp_path / "oversized.bin")
-        binary_content = bytes(range(256)) * 500  # 128,000 bytes -- the exact payload that originally caught this bug
+        binary_content = (
+            bytes(range(256)) * 500
+        )  # 128,000 bytes -- the exact payload that originally caught this bug
         encoded = base64.b64encode(binary_content).decode("ascii")
 
         req = urllib.request.Request(
@@ -193,10 +207,14 @@ def test_server_file_transfer_calls_binary_safe_endpoints(monkeypatch, tmp_path)
     assert data == b"\x00\x01\xff hello"
 
     # write side
-    asyncio.run(srv._location_write_bytes("pc:desktop:C:\\some\\dest.bin", b"\x02\x03binary"))
+    asyncio.run(
+        srv._location_write_bytes("pc:desktop:C:\\some\\dest.bin", b"\x02\x03binary")
+    )
     assert calls["post_path"] == "/write_file"
     assert "content_b64" in calls["post_body"]
-    assert "content" not in calls["post_body"], "should send content_b64, not the old text content field"
+    assert "content" not in calls["post_body"], (
+        "should send content_b64, not the old text content field"
+    )
     assert base64.b64decode(calls["post_body"]["content_b64"]) == b"\x02\x03binary"
 
 
@@ -228,7 +246,9 @@ def test_pc_transfer_rejects_payload_over_the_safe_cap(monkeypatch):
         asyncio.run(srv._location_write_bytes("pc:desktop:/tmp/x.bin", oversized))
         assert False, "should have raised ValueError"
     except ValueError as e:
-        assert str(srv._PC_TRANSFER_SAFE_MAX_BYTES) in str(e) or str(srv._FILE_TRANSFER_MAX_BYTES) in str(e)
+        assert str(srv._PC_TRANSFER_SAFE_MAX_BYTES) in str(e) or str(
+            srv._FILE_TRANSFER_MAX_BYTES
+        ) in str(e)
     assert called["post"] is False, "should reject before ever calling the agent"
 
 
@@ -239,5 +259,7 @@ def test_pc_transfer_accepts_payload_within_the_safe_cap(monkeypatch):
     monkeypatch.setattr(srv, "_org_post", fake_org_post)
 
     ok_size = srv._PC_TRANSFER_SAFE_MAX_BYTES  # exactly at the cap, inclusive
-    result = asyncio.run(srv._location_write_bytes("pc:desktop:/tmp/x.bin", b"x" * ok_size))
+    result = asyncio.run(
+        srv._location_write_bytes("pc:desktop:/tmp/x.bin", b"x" * ok_size)
+    )
     assert "pc:desktop" in result

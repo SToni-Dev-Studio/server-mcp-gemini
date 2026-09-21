@@ -45,6 +45,7 @@ root (checked explicitly, not left to fail opaquely partway through).
 `pc list`, `diagnostics`, `config show`, and the read-only `render get`
 do not.
 """
+
 import argparse
 import json
 import os
@@ -57,8 +58,12 @@ from pathlib import Path
 
 PC_TUNNEL_CONF_DIR = Path(os.environ.get("HUB_CLI_PC_TUNNEL_DIR", "/etc/pc-tunnel"))
 KNOWN_HOSTS_DIR = PC_TUNNEL_CONF_DIR / "known_hosts.d"
-CLI_CONFIG_PATH = Path(os.environ.get("HUB_CLI_CONFIG_PATH", "/etc/hub-cli/config.json"))
-RENDER_API = os.environ.get("HUB_CLI_RENDER_API", "https://api.render.com/v1")  # overridable for tests
+CLI_CONFIG_PATH = Path(
+    os.environ.get("HUB_CLI_CONFIG_PATH", "/etc/hub-cli/config.json")
+)
+RENDER_API = os.environ.get(
+    "HUB_CLI_RENDER_API", "https://api.render.com/v1"
+)  # overridable for tests
 DEFAULT_TUNNEL_USER = "sepisotoni"
 
 
@@ -78,7 +83,10 @@ def _require_root():
     if os.environ.get("HUB_CLI_SKIP_ROOT_CHECK") == "1":
         return
     if os.geteuid() != 0:
-        print("error: this command needs root (systemd unit + /etc file changes) -- try sudo", file=sys.stderr)
+        print(
+            "error: this command needs root (systemd unit + /etc file changes) -- try sudo",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
 
@@ -94,12 +102,15 @@ def _load_cli_config() -> dict:
 def _save_cli_config(data: dict) -> None:
     CLI_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
     CLI_CONFIG_PATH.write_text(json.dumps(data, indent=2))
-    os.chmod(CLI_CONFIG_PATH, 0o600)  # contains RENDER_API_KEY -- must not be world-readable
+    os.chmod(
+        CLI_CONFIG_PATH, 0o600
+    )  # contains RENDER_API_KEY -- must not be world-readable
 
 
 # ---------------------------------------------------------------------------
 # pc subcommands
 # ---------------------------------------------------------------------------
+
 
 def cmd_pc_list(args):
     if not PC_TUNNEL_CONF_DIR.is_dir():
@@ -122,7 +133,9 @@ def cmd_pc_list(args):
         if shutil.which("systemctl"):
             r = _run(["systemctl", "is-active", f"pc-tunnel@{name}.service"])
             active = (r.stdout or "").strip() or "unknown"
-        print(f"{name:<15} {pc_ip:<16} port={port:<6} pinned={'yes' if pinned else 'NO':<4} service={active}")
+        print(
+            f"{name:<15} {pc_ip:<16} port={port:<6} pinned={'yes' if pinned else 'NO':<4} service={active}"
+        )
     return 0
 
 
@@ -131,22 +144,36 @@ def cmd_pc_add(args):
     PC_TUNNEL_CONF_DIR.mkdir(parents=True, exist_ok=True)
     conf_path = PC_TUNNEL_CONF_DIR / f"{args.name}.conf"
     if conf_path.exists() and not args.force:
-        print(f"error: {conf_path} already exists (use --force to overwrite)", file=sys.stderr)
+        print(
+            f"error: {conf_path} already exists (use --force to overwrite)",
+            file=sys.stderr,
+        )
         return 1
     conf_path.write_text(f"PC_IP={args.ip}\nPORT={args.port}\n")
     print(f"Wrote {conf_path}")
 
     if not shutil.which("systemctl"):
-        print("systemctl not available -- conf file written, but couldn't enable/start the tunnel service here")
+        print(
+            "systemctl not available -- conf file written, but couldn't enable/start the tunnel service here"
+        )
         return 0
 
     r = _run(["systemctl", "daemon-reload"])
     if r.returncode != 0:
-        print(f"warning: systemctl daemon-reload failed: {r.stderr.strip()}", file=sys.stderr)
+        print(
+            f"warning: systemctl daemon-reload failed: {r.stderr.strip()}",
+            file=sys.stderr,
+        )
     r = _run(["systemctl", "enable", "--now", f"pc-tunnel@{args.name}"])
     if r.returncode != 0:
-        print(f"warning: could not enable/start pc-tunnel@{args.name}: {r.stderr.strip()}", file=sys.stderr)
-        print("(conf file is in place -- fix SSH access / retry `systemctl start` once it works)", file=sys.stderr)
+        print(
+            f"warning: could not enable/start pc-tunnel@{args.name}: {r.stderr.strip()}",
+            file=sys.stderr,
+        )
+        print(
+            "(conf file is in place -- fix SSH access / retry `systemctl start` once it works)",
+            file=sys.stderr,
+        )
         return 1
     print(f"pc-tunnel@{args.name} enabled and started")
     if not (KNOWN_HOSTS_DIR / args.name).exists():
@@ -166,7 +193,9 @@ def cmd_pc_remove(args):
     pinned = KNOWN_HOSTS_DIR / args.name
     if pinned.exists():
         pinned.unlink()
-    print(f"Removed {args.name} (service stopped+disabled, conf + pinned host key deleted)")
+    print(
+        f"Removed {args.name} (service stopped+disabled, conf + pinned host key deleted)"
+    )
     return 0
 
 
@@ -174,7 +203,10 @@ def cmd_pc_pin(args):
     _require_root()
     conf_path = PC_TUNNEL_CONF_DIR / f"{args.name}.conf"
     if not conf_path.exists():
-        print(f"error: no such PC configured: {args.name} (run: hub-cli pc add first)", file=sys.stderr)
+        print(
+            f"error: no such PC configured: {args.name} (run: hub-cli pc add first)",
+            file=sys.stderr,
+        )
         return 1
     pc_ip = None
     for line in conf_path.read_text().splitlines():
@@ -189,20 +221,26 @@ def cmd_pc_pin(args):
 
     r = _run(["ssh-keyscan", "-t", "ed25519", pc_ip])
     if r.returncode != 0 or not r.stdout.strip():
-        print(f"error: ssh-keyscan against {pc_ip} produced no key: {r.stderr.strip()}", file=sys.stderr)
+        print(
+            f"error: ssh-keyscan against {pc_ip} produced no key: {r.stderr.strip()}",
+            file=sys.stderr,
+        )
         return 1
 
     KNOWN_HOSTS_DIR.mkdir(parents=True, exist_ok=True)
     pinned_file = KNOWN_HOSTS_DIR / args.name
     pinned_file.write_text(r.stdout)
     print(f"Pinned host key for {args.name} ({pc_ip}) -> {pinned_file}")
-    print("Restart the tunnel to pick this up: systemctl restart pc-tunnel@" + args.name)
+    print(
+        "Restart the tunnel to pick this up: systemctl restart pc-tunnel@" + args.name
+    )
     return 0
 
 
 # ---------------------------------------------------------------------------
 # diagnostics subcommand -- delegates to hub-diagnostics.py
 # ---------------------------------------------------------------------------
+
 
 def cmd_diagnostics(args):
     script = Path(__file__).parent / "hub-diagnostics.py"
@@ -213,7 +251,10 @@ def cmd_diagnostics(args):
         # where the layout might differ slightly.
         script = Path("/usr/lib/hub-cicd/hub-diagnostics.py")
     if not script.exists():
-        print(f"error: could not find hub-diagnostics.py (looked next to this script and at {script})", file=sys.stderr)
+        print(
+            f"error: could not find hub-diagnostics.py (looked next to this script and at {script})",
+            file=sys.stderr,
+        )
         return 1
     cmd = [sys.executable, str(script)]
     if args.json:
@@ -225,10 +266,13 @@ def cmd_diagnostics(args):
 # render subcommands
 # ---------------------------------------------------------------------------
 
+
 def _render_credentials():
     cfg = _load_cli_config()
     api_key = os.environ.get("RENDER_API_KEY", "") or cfg.get("render_api_key", "")
-    service_id = os.environ.get("RENDER_SERVICE_ID", "") or cfg.get("render_service_id", "")
+    service_id = os.environ.get("RENDER_SERVICE_ID", "") or cfg.get(
+        "render_service_id", ""
+    )
     return api_key, service_id
 
 
@@ -240,11 +284,16 @@ def _render_request(method: str, path: str, api_key: str, body: dict = None):
     implementations of the same API contract."""
     url = f"{RENDER_API}{path}"
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(url, data=data, method=method, headers={
-        "Authorization": f"Bearer {api_key}",
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-    })
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method=method,
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+        },
+    )
     with urllib.request.urlopen(req, timeout=15) as resp:
         return json.loads(resp.read().decode())
 
@@ -252,7 +301,10 @@ def _render_request(method: str, path: str, api_key: str, body: dict = None):
 def cmd_render_get(args):
     api_key, service_id = _render_credentials()
     if not (api_key and service_id):
-        print("error: Render credentials not configured -- run: hub-cli config set-render-credentials --api-key ... --service-id ...", file=sys.stderr)
+        print(
+            "error: Render credentials not configured -- run: hub-cli config set-render-credentials --api-key ... --service-id ...",
+            file=sys.stderr,
+        )
         return 1
     try:
         items = _render_request("GET", f"/services/{service_id}/env-vars", api_key)
@@ -270,10 +322,18 @@ def cmd_render_get(args):
 def cmd_render_set(args):
     api_key, service_id = _render_credentials()
     if not (api_key and service_id):
-        print("error: Render credentials not configured -- run: hub-cli config set-render-credentials --api-key ... --service-id ...", file=sys.stderr)
+        print(
+            "error: Render credentials not configured -- run: hub-cli config set-render-credentials --api-key ... --service-id ...",
+            file=sys.stderr,
+        )
         return 1
     try:
-        _render_request("PUT", f"/services/{service_id}/env-vars/{args.key}", api_key, {"value": args.value})
+        _render_request(
+            "PUT",
+            f"/services/{service_id}/env-vars/{args.key}",
+            api_key,
+            {"value": args.value},
+        )
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         print(f"error: Render API request failed: {e}", file=sys.stderr)
         return 1
@@ -287,7 +347,12 @@ def cmd_render_deploy(args):
         print("error: Render credentials not configured", file=sys.stderr)
         return 1
     try:
-        _render_request("POST", f"/services/{service_id}/deploys", api_key, {"clearCache": "do_not_clear"})
+        _render_request(
+            "POST",
+            f"/services/{service_id}/deploys",
+            api_key,
+            {"clearCache": "do_not_clear"},
+        )
     except (urllib.error.HTTPError, urllib.error.URLError) as e:
         print(f"error: Render API request failed: {e}", file=sys.stderr)
         return 1
@@ -299,12 +364,21 @@ def cmd_render_deploy(args):
 # config subcommands
 # ---------------------------------------------------------------------------
 
+
 def cmd_config_show(args):
     cfg = _load_cli_config()
-    print(f"Config file: {CLI_CONFIG_PATH} ({'exists' if CLI_CONFIG_PATH.exists() else 'not created yet'})")
-    print(f"Render API key: {'set' if cfg.get('render_api_key') or os.environ.get('RENDER_API_KEY') else 'NOT set'}")
-    print(f"Render service ID: {cfg.get('render_service_id') or os.environ.get('RENDER_SERVICE_ID') or 'NOT set'}")
-    print(f"PC tunnel conf dir: {PC_TUNNEL_CONF_DIR} ({'exists' if PC_TUNNEL_CONF_DIR.is_dir() else 'not created yet'})")
+    print(
+        f"Config file: {CLI_CONFIG_PATH} ({'exists' if CLI_CONFIG_PATH.exists() else 'not created yet'})"
+    )
+    print(
+        f"Render API key: {'set' if cfg.get('render_api_key') or os.environ.get('RENDER_API_KEY') else 'NOT set'}"
+    )
+    print(
+        f"Render service ID: {cfg.get('render_service_id') or os.environ.get('RENDER_SERVICE_ID') or 'NOT set'}"
+    )
+    print(
+        f"PC tunnel conf dir: {PC_TUNNEL_CONF_DIR} ({'exists' if PC_TUNNEL_CONF_DIR.is_dir() else 'not created yet'})"
+    )
     return 0
 
 
@@ -324,18 +398,27 @@ def cmd_config_set_render_credentials(args):
 # argument parsing
 # ---------------------------------------------------------------------------
 
+
 def build_parser():
-    ap = argparse.ArgumentParser(prog="hub-cli", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        prog="hub-cli",
+        description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     sub = ap.add_subparsers(dest="command", required=True)
 
-    pc = sub.add_parser("pc", help="Manage configured PCs (pc-tunnel@.service instances)")
+    pc = sub.add_parser(
+        "pc", help="Manage configured PCs (pc-tunnel@.service instances)"
+    )
     pc_sub = pc.add_subparsers(dest="pc_command", required=True)
     pc_sub.add_parser("list", help="List configured PCs").set_defaults(func=cmd_pc_list)
     p = pc_sub.add_parser("add", help="Add a PC and start its tunnel")
     p.add_argument("name")
     p.add_argument("ip")
     p.add_argument("--port", type=int, default=7842)
-    p.add_argument("--force", action="store_true", help="Overwrite an existing conf file")
+    p.add_argument(
+        "--force", action="store_true", help="Overwrite an existing conf file"
+    )
     p.set_defaults(func=cmd_pc_add)
     p = pc_sub.add_parser("remove", help="Remove a PC and stop its tunnel")
     p.add_argument("name")
@@ -348,7 +431,9 @@ def build_parser():
     p.add_argument("--json", action="store_true")
     p.set_defaults(func=cmd_diagnostics)
 
-    render = sub.add_parser("render", help="Manage the Render-hosted service's env vars")
+    render = sub.add_parser(
+        "render", help="Manage the Render-hosted service's env vars"
+    )
     render_sub = render.add_subparsers(dest="render_command", required=True)
     p = render_sub.add_parser("get", help="Read one env var")
     p.add_argument("key")
@@ -357,12 +442,18 @@ def build_parser():
     p.add_argument("key")
     p.add_argument("value")
     p.set_defaults(func=cmd_render_set)
-    render_sub.add_parser("deploy", help="Trigger a redeploy").set_defaults(func=cmd_render_deploy)
+    render_sub.add_parser("deploy", help="Trigger a redeploy").set_defaults(
+        func=cmd_render_deploy
+    )
 
     config = sub.add_parser("config", help="This CLI's own local config")
     config_sub = config.add_subparsers(dest="config_command", required=True)
-    config_sub.add_parser("show", help="Show config (never prints secret values)").set_defaults(func=cmd_config_show)
-    p = config_sub.add_parser("set-render-credentials", help="Store Render API credentials locally")
+    config_sub.add_parser(
+        "show", help="Show config (never prints secret values)"
+    ).set_defaults(func=cmd_config_show)
+    p = config_sub.add_parser(
+        "set-render-credentials", help="Store Render API credentials locally"
+    )
     p.add_argument("--api-key")
     p.add_argument("--service-id")
     p.set_defaults(func=cmd_config_set_render_credentials)

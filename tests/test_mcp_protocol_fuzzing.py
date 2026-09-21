@@ -21,6 +21,7 @@ Findings locked in here:
     handled cleanly by the SDK/Pydantic validation layer -- no crashes, no
     leaked internals, always a well-formed JSON-RPC error.
 """
+
 import json
 import os
 import re
@@ -63,11 +64,14 @@ def app_client(tmp_path):
     representative of the real deployment."""
     port = _free_port()
     runner = tmp_path / "run_server.py"
-    script = RUNNER_TEMPLATE.replace("__PORT__", str(port)).replace("__REPO_ROOT__", REPO_ROOT)
+    script = RUNNER_TEMPLATE.replace("__PORT__", str(port)).replace(
+        "__REPO_ROOT__", REPO_ROOT
+    )
     runner.write_text(script)
     proc = subprocess.Popen(
         [sys.executable, str(runner)],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
     )
     base_url = f"http://127.0.0.1:{port}"
     client = httpx.Client(base_url=base_url, timeout=10)
@@ -116,10 +120,20 @@ def test_host_header_with_port_is_rejected_by_dns_rebinding_check(app_client):
     rejected with 421, even with a fully correct bearer token."""
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost:8000"  # what a real local client would send
-    r = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "x", "version": "1"}},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "x", "version": "1"},
+            },
+        },
+    )
     assert r.status_code == 421, (
         "if this now passes, the port-wildcard gap was fixed -- update "
         "SECURITY_FINDINGS.md to mark it resolved rather than deleting "
@@ -130,23 +144,46 @@ def test_host_header_with_port_is_rejected_by_dns_rebinding_check(app_client):
 def test_bare_host_header_without_port_is_accepted(app_client):
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost"
-    r = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "x", "version": "1"}},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "x", "version": "1"},
+            },
+        },
+    )
     assert r.status_code == 200
 
 
 def _init_session(app_client):
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost"
-    r = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 1, "method": "initialize",
-        "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "x", "version": "1"}},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "x", "version": "1"},
+            },
+        },
+    )
     sid = r.headers.get("Mcp-Session-Id")
-    app_client.post("/mcp", headers={**headers, "Mcp-Session-Id": sid},
-                     json={"jsonrpc": "2.0", "method": "notifications/initialized"})
+    app_client.post(
+        "/mcp",
+        headers={**headers, "Mcp-Session-Id": sid},
+        json={"jsonrpc": "2.0", "method": "notifications/initialized"},
+    )
     return sid
 
 
@@ -161,10 +198,16 @@ def test_stolen_session_id_without_bearer_token_is_rejected(app_client):
     headers_no_auth = {k: v for k, v in HEADERS_BASE.items() if k != "Authorization"}
     headers_no_auth["Host"] = "localhost"
     headers_no_auth["Mcp-Session-Id"] = sid
-    r = app_client.post("/mcp", headers=headers_no_auth, json={
-        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "server_status", "arguments": {}},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers_no_auth,
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "server_status", "arguments": {}},
+        },
+    )
     assert r.status_code == 401, (
         "a valid session id must never grant access without the bearer "
         "token -- if this regresses, session hijacking via a leaked "
@@ -176,19 +219,28 @@ def test_forged_session_id_is_cleanly_rejected(app_client):
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost"
     headers["Mcp-Session-Id"] = "totally-made-up-session-id"
-    r = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
-        "params": {"name": "server_status", "arguments": {}},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "server_status", "arguments": {}},
+        },
+    )
     assert r.status_code == 404
 
 
-@pytest.mark.parametrize("body", [
-    b"",
-    b"not json",
-    b'{"jsonrpc":"2.0","id":1,"method":"initialize"',  # truncated
-    b'[{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}]',  # array not object
-])
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"",
+        b"not json",
+        b'{"jsonrpc":"2.0","id":1,"method":"initialize"',  # truncated
+        b'[{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}]',  # array not object
+    ],
+)
 def test_malformed_envelopes_never_500_or_leak_traceback(app_client, body):
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost"
@@ -198,14 +250,17 @@ def test_malformed_envelopes_never_500_or_leak_traceback(app_client, body):
     assert r.status_code == 400
 
 
-@pytest.mark.parametrize("bad_args,expect_field", [
-    ({}, "path"),                       # missing required arg
-    ({"path": 12345}, "path"),          # wrong type: int for str
-    ({"path": None}, "path"),           # wrong type: null for str
-    ({"path": ["a", "b"]}, "path"),     # wrong type: list for str
-    ({"path": {"x": 1}}, "path"),       # wrong type: dict for str
-    ({"path": True}, "path"),           # wrong type: bool for str
-])
+@pytest.mark.parametrize(
+    "bad_args,expect_field",
+    [
+        ({}, "path"),  # missing required arg
+        ({"path": 12345}, "path"),  # wrong type: int for str
+        ({"path": None}, "path"),  # wrong type: null for str
+        ({"path": ["a", "b"]}, "path"),  # wrong type: list for str
+        ({"path": {"x": 1}}, "path"),  # wrong type: dict for str
+        ({"path": True}, "path"),  # wrong type: bool for str
+    ],
+)
 def test_tool_call_type_validation_never_crashes(app_client, bad_args, expect_field):
     """Pydantic-based argument validation must reject every wrong type
     cleanly, as a tool-result error, never as an unhandled exception."""
@@ -213,10 +268,16 @@ def test_tool_call_type_validation_never_crashes(app_client, bad_args, expect_fi
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost"
     headers["Mcp-Session-Id"] = sid
-    r = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 3, "method": "tools/call",
-        "params": {"name": "server_read_file", "arguments": bad_args},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "server_read_file", "arguments": bad_args},
+        },
+    )
     assert r.status_code == 200
     parsed = _extract_json(r.text)
     assert parsed is not None
@@ -230,10 +291,19 @@ def test_embedded_null_byte_in_argument_is_caught_cleanly(app_client):
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost"
     headers["Mcp-Session-Id"] = sid
-    r = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 4, "method": "tools/call",
-        "params": {"name": "server_read_file", "arguments": {"path": "/tmp/foo\x00bar"}},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "server_read_file",
+                "arguments": {"path": "/tmp/foo\x00bar"},
+            },
+        },
+    )
     assert r.status_code == 200
     parsed = _extract_json(r.text)
     text = json.dumps(parsed)
@@ -246,13 +316,28 @@ def test_oversized_string_argument_does_not_crash_server(app_client):
     headers = dict(HEADERS_BASE)
     headers["Host"] = "localhost"
     headers["Mcp-Session-Id"] = sid
-    r = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 5, "method": "tools/call",
-        "params": {"name": "server_read_file", "arguments": {"path": "A" * 2_000_000}},
-    })
+    r = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": {
+                "name": "server_read_file",
+                "arguments": {"path": "A" * 2_000_000},
+            },
+        },
+    )
     assert r.status_code == 200
-    r2 = app_client.post("/mcp", headers=headers, json={
-        "jsonrpc": "2.0", "id": 6, "method": "tools/call",
-        "params": {"name": "server_status", "arguments": {}},
-    })
+    r2 = app_client.post(
+        "/mcp",
+        headers=headers,
+        json={
+            "jsonrpc": "2.0",
+            "id": 6,
+            "method": "tools/call",
+            "params": {"name": "server_status", "arguments": {}},
+        },
+    )
     assert r2.status_code == 200

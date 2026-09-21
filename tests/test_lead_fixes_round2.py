@@ -13,6 +13,7 @@ agent/docs-release and agent/security-qa:
    and let it silently degrade to a default downstream (security-qa
    finding 9).
 """
+
 import os
 import sys
 import asyncio
@@ -25,21 +26,31 @@ import server as srv
 
 
 def test_write_codespace_file_reports_real_failure():
-    with patch.object(srv, "exec_command", new=AsyncMock(return_value="bash: cannot create: Permission denied")):
-        result = asyncio.run(srv.write_codespace_file("some-space", "/readonly/x.txt", "hello"))
+    with patch.object(
+        srv,
+        "exec_command",
+        new=AsyncMock(return_value="bash: cannot create: Permission denied"),
+    ):
+        result = asyncio.run(
+            srv.write_codespace_file("some-space", "/readonly/x.txt", "hello")
+        )
     assert result.startswith("Write failed"), result
 
 
 def test_write_codespace_file_reports_real_success():
     with patch.object(srv, "exec_command", new=AsyncMock(return_value="__WRITE_OK__")):
-        result = asyncio.run(srv.write_codespace_file("some-space", "/tmp/x.txt", "hello"))
+        result = asyncio.run(
+            srv.write_codespace_file("some-space", "/tmp/x.txt", "hello")
+        )
     assert result.startswith("Successfully wrote"), result
 
 
 def test_write_codespace_file_mkdir_p_included_in_command():
     mock = AsyncMock(return_value="__WRITE_OK__")
     with patch.object(srv, "exec_command", new=mock):
-        asyncio.run(srv.write_codespace_file("some-space", "/new/nested/dir/x.txt", "hello"))
+        asyncio.run(
+            srv.write_codespace_file("some-space", "/new/nested/dir/x.txt", "hello")
+        )
     sent_cmd = mock.call_args.args[1]
     assert "mkdir -p" in sent_cmd
 
@@ -52,7 +63,11 @@ def test_pc_read_file_preview_clamps_huge_max_bytes():
         return {"content": "ok"}
 
     with patch.object(srv, "_org_get", new=fake_org_get):
-        asyncio.run(srv.pc_read_file_preview("C:\\x.txt", max_bytes=10_000_000_000, pc="desktop"))
+        asyncio.run(
+            srv.pc_read_file_preview(
+                "C:\\x.txt", max_bytes=10_000_000_000, pc="desktop"
+            )
+        )
     assert captured["max_bytes"] == srv._PC_PREVIEW_MAX_BYTES_CEILING
 
 
@@ -114,5 +129,13 @@ def test_file_transfer_rejects_empty_codespace_name():
 
 def test_file_transfer_still_accepts_valid_pc_and_codespace_addresses():
     assert srv._parse_location("pc:desktop:/x") == ("pc", "desktop", "/x")
-    assert srv._parse_location("codespace:my-space:/x") == ("codespace", "my-space", "/x")
-    assert srv._parse_location("codespace:my-space@tertiary:/x") == ("codespace", "my-space@tertiary", "/x")
+    assert srv._parse_location("codespace:my-space:/x") == (
+        "codespace",
+        "my-space",
+        "/x",
+    )
+    assert srv._parse_location("codespace:my-space@tertiary:/x") == (
+        "codespace",
+        "my-space@tertiary",
+        "/x",
+    )

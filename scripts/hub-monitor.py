@@ -75,22 +75,38 @@ def log_and_push_event(machine_name, event, data):
         f.write(json.dumps(event_entry) + "\n")
 
     # Push to cloud server if configured
-    cloud_url = os.environ.get("CLOUD_SERVER_URL", "https://server-mcp-gemini.fly.dev").rstrip("/") + "/events/pc_status"
-    bearer_token = os.environ.get("MCP_SERVER_PASSWORD", os.environ.get("ADMIN_PASSWORD", "gemini_mcp_secret_2026"))
+    cloud_url = (
+        os.environ.get("CLOUD_SERVER_URL", "https://server-mcp-gemini.fly.dev").rstrip(
+            "/"
+        )
+        + "/events/pc_status"
+    )
+    bearer_token = os.environ.get(
+        "MCP_SERVER_PASSWORD",
+        os.environ.get("ADMIN_PASSWORD", "gemini_mcp_secret_2026"),
+    )
     try:
-        payload = json.dumps({
-            "machine_name": machine_name,
-            "event": event,
-            "lan_ip": data.get("lan_ip", ""),
-            "port": data.get("port", 0),
-            "timestamp": now_iso,
-        }).encode("utf-8")
-        req = urllib.request.Request(cloud_url, data=payload, headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {bearer_token}",
-        })
+        payload = json.dumps(
+            {
+                "machine_name": machine_name,
+                "event": event,
+                "lan_ip": data.get("lan_ip", ""),
+                "port": data.get("port", 0),
+                "timestamp": now_iso,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            cloud_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {bearer_token}",
+            },
+        )
         urllib.request.urlopen(req, timeout=5)
-        print(f"[Hub Monitor] Event '{event}' for '{machine_name}' pushed to cloud server.")
+        print(
+            f"[Hub Monitor] Event '{event}' for '{machine_name}' pushed to cloud server."
+        )
     except Exception as e:
         print(f"[Hub Monitor] Cloud push failed for '{machine_name}': {e}")
 
@@ -134,7 +150,9 @@ class RegistrationHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "registered", "name": name}).encode("utf-8"))
+            self.wfile.write(
+                json.dumps({"status": "registered", "name": name}).encode("utf-8")
+            )
         else:
             self.send_response(404)
             self.end_headers()
@@ -186,9 +204,18 @@ def poller_loop(interval_sec=300):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Proposal v2 Hub Auto-Discovery Listener & Poller")
-    parser.add_argument("--port", type=int, default=7840, help="Listen port for PC announcements (default 7840)")
-    parser.add_argument("--once", action="store_true", help="Run one poll pass and exit")
+    parser = argparse.ArgumentParser(
+        description="Proposal v2 Hub Auto-Discovery Listener & Poller"
+    )
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=7840,
+        help="Listen port for PC announcements (default 7840)",
+    )
+    parser.add_argument(
+        "--once", action="store_true", help="Run one poll pass and exit"
+    )
     args = parser.parse_args()
 
     load_registry()

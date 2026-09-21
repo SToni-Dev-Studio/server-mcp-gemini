@@ -31,6 +31,7 @@ generally is not (no PID 1 / no D-Bus session) -- see
 coordination/status/hub-cicd.md for exactly what was and wasn't run
 against live infrastructure.
 """
+
 import argparse
 import json
 import shutil
@@ -60,6 +61,7 @@ def check_result(name, status, detail=""):
 # ---------------------------------------------------------------------------
 # Individual checks
 # ---------------------------------------------------------------------------
+
 
 def discover_pcs(conf_dir: Path = PC_TUNNEL_CONF_DIR) -> list:
     """Returns [(name, pc_ip, port), ...] parsed from /etc/pc-tunnel/<name>.conf
@@ -96,23 +98,29 @@ def check_pc_tunnel_config_dir(conf_dir: Path = PC_TUNNEL_CONF_DIR) -> dict:
     pcs = discover_pcs(conf_dir)
     if not pcs:
         return check_result(
-            "PC tunnel config directory", NOT_CONFIGURED, f"{conf_dir} exists but has no *.conf files"
+            "PC tunnel config directory",
+            NOT_CONFIGURED,
+            f"{conf_dir} exists but has no *.conf files",
         )
     malformed = [name for name, ip, port in pcs if not ip or not port]
     if malformed:
         return check_result(
-            "PC tunnel config directory", FAIL,
+            "PC tunnel config directory",
+            FAIL,
             f"{len(malformed)} malformed conf file(s) missing PC_IP or PORT: {', '.join(malformed)}",
         )
     return check_result(
-        "PC tunnel config directory", PASS,
+        "PC tunnel config directory",
+        PASS,
         f"{len(pcs)} PC(s) configured: {', '.join(n for n, _, _ in pcs)}",
     )
 
 
 def check_systemd_available(run=_run) -> dict:
     if not shutil.which("systemctl"):
-        return check_result("systemd available", SKIPPED, "systemctl not on PATH (not a systemd host)")
+        return check_result(
+            "systemd available", SKIPPED, "systemctl not on PATH (not a systemd host)"
+        )
     r = run(["systemctl", "is-system-running"])
     state = (r.stdout or "").strip()
     # Per systemd's own documented values for `is-system-running`: "offline"
@@ -128,15 +136,25 @@ def check_systemd_available(run=_run) -> dict:
     # means a real manager IS there and can be queried, even if the
     # overall system health isn't "running" cleanly (e.g. "degraded" just
     # means some unrelated unit failed, not that OUR checks are useless).
-    if r.returncode == -1 or "Failed to connect to bus" in (r.stderr or "") or state in ("offline", "unknown", ""):
-        return check_result("systemd available", SKIPPED, f"no usable systemd manager (state: {state or 'no output'})")
+    if (
+        r.returncode == -1
+        or "Failed to connect to bus" in (r.stderr or "")
+        or state in ("offline", "unknown", "")
+    ):
+        return check_result(
+            "systemd available",
+            SKIPPED,
+            f"no usable systemd manager (state: {state or 'no output'})",
+        )
     return check_result("systemd available", PASS, state)
 
 
 def check_tunnel_service(name: str, run=_run) -> dict:
     unit = f"pc-tunnel@{name}.service"
     if not shutil.which("systemctl"):
-        return check_result(f"tunnel service ({unit})", SKIPPED, "systemctl not available")
+        return check_result(
+            f"tunnel service ({unit})", SKIPPED, "systemctl not available"
+        )
     r = run(["systemctl", "is-active", unit])
     state = (r.stdout or "").strip() or (r.stderr or "").strip().replace("\n", " ")
     if state == "active":
@@ -144,23 +162,39 @@ def check_tunnel_service(name: str, run=_run) -> dict:
     if state in ("inactive", "failed", "activating", "deactivating"):
         return check_result(f"tunnel service ({unit})", FAIL, f"state: {state}")
     # "unknown" / connection error / anything else we don't recognize
-    return check_result(f"tunnel service ({unit})", SKIPPED, f"could not determine state ({state or 'no output'})")
+    return check_result(
+        f"tunnel service ({unit})",
+        SKIPPED,
+        f"could not determine state ({state or 'no output'})",
+    )
 
 
 def check_port_listening(name: str, port: str) -> dict:
     if not port:
-        return check_result(f"port listening ({name})", NOT_CONFIGURED, "no PORT in conf file")
+        return check_result(
+            f"port listening ({name})", NOT_CONFIGURED, "no PORT in conf file"
+        )
     try:
         port_i = int(port)
     except ValueError:
-        return check_result(f"port listening ({name})", FAIL, f"PORT is not a number: {port!r}")
+        return check_result(
+            f"port listening ({name})", FAIL, f"PORT is not a number: {port!r}"
+        )
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(2)
     try:
         result = sock.connect_ex(("127.0.0.1", port_i))
         if result == 0:
-            return check_result(f"port listening ({name})", PASS, f"127.0.0.1:{port_i} accepting connections")
-        return check_result(f"port listening ({name})", FAIL, f"127.0.0.1:{port_i} not accepting connections")
+            return check_result(
+                f"port listening ({name})",
+                PASS,
+                f"127.0.0.1:{port_i} accepting connections",
+            )
+        return check_result(
+            f"port listening ({name})",
+            FAIL,
+            f"127.0.0.1:{port_i} not accepting connections",
+        )
     finally:
         sock.close()
 
@@ -170,19 +204,28 @@ def check_tailscale(run=_run) -> dict:
         return check_result("Tailscale", NOT_CONFIGURED, "tailscale not installed")
     r = run(["tailscale", "status", "--json"], timeout=10)
     if r.returncode != 0:
-        return check_result("Tailscale", FAIL, (r.stderr or "tailscale status failed").strip()[:200])
+        return check_result(
+            "Tailscale", FAIL, (r.stderr or "tailscale status failed").strip()[:200]
+        )
     try:
         data = json.loads(r.stdout)
     except json.JSONDecodeError:
-        return check_result("Tailscale", FAIL, "tailscale status returned non-JSON output")
+        return check_result(
+            "Tailscale", FAIL, "tailscale status returned non-JSON output"
+        )
     backend_state = data.get("BackendState", "?")
     if backend_state == "Running":
         return check_result("Tailscale", PASS, "BackendState: Running")
     return check_result("Tailscale", FAIL, f"BackendState: {backend_state}")
 
 
-def check_ssh_reachable(name: str, pc_ip: str, ssh_user: str, run=_run,
-                         known_hosts_dir: Path = Path("/etc/pc-tunnel/known_hosts.d")) -> dict:
+def check_ssh_reachable(
+    name: str,
+    pc_ip: str,
+    ssh_user: str,
+    run=_run,
+    known_hosts_dir: Path = Path("/etc/pc-tunnel/known_hosts.d"),
+) -> dict:
     if not pc_ip:
         return check_result(f"SSH to {name}", NOT_CONFIGURED, "no PC_IP in conf file")
     if not shutil.which("ssh"):
@@ -201,22 +244,46 @@ def check_ssh_reachable(name: str, pc_ip: str, ssh_user: str, run=_run,
     # different state worth distinguishing, not something to paper over.
     known_hosts_file = known_hosts_dir / name
     if known_hosts_file.exists():
-        host_key_opts = ["-o", "StrictHostKeyChecking=yes", "-o", f"UserKnownHostsFile={known_hosts_file}"]
+        host_key_opts = [
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_file}",
+        ]
         pinned = True
     else:
         host_key_opts = ["-o", "StrictHostKeyChecking=accept-new"]
         pinned = False
 
     r = run(
-        ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", *host_key_opts,
-         f"{ssh_user}@{pc_ip}", "true"],
+        [
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "ConnectTimeout=5",
+            *host_key_opts,
+            f"{ssh_user}@{pc_ip}",
+            "true",
+        ],
         timeout=8,
     )
     if r.returncode == 0:
-        note = "key verified against pinned known_hosts" if pinned else "NOT pinned yet (see pc-tunnel@.service setup step 4)"
-        return check_result(f"SSH to {name}", PASS, f"{ssh_user}@{pc_ip} reachable, key auth working ({note})")
+        note = (
+            "key verified against pinned known_hosts"
+            if pinned
+            else "NOT pinned yet (see pc-tunnel@.service setup step 4)"
+        )
+        return check_result(
+            f"SSH to {name}",
+            PASS,
+            f"{ssh_user}@{pc_ip} reachable, key auth working ({note})",
+        )
     detail = (r.stderr or "ssh failed").strip()[:200]
-    if pinned and ("REMOTE HOST IDENTIFICATION HAS CHANGED" in detail or "Host key verification failed" in detail):
+    if pinned and (
+        "REMOTE HOST IDENTIFICATION HAS CHANGED" in detail
+        or "Host key verification failed" in detail
+    ):
         detail = f"HOST KEY MISMATCH against pinned known_hosts -- {detail}"
     return check_result(f"SSH to {name}", FAIL, detail)
 
@@ -235,8 +302,16 @@ def check_disk_space(path="/", warn_pct=90) -> dict:
 # Runner
 # ---------------------------------------------------------------------------
 
-def run_all(conf_dir: Path = PC_TUNNEL_CONF_DIR, ssh_user: str = "sepisotoni", run=_run) -> list:
-    checks = [check_systemd_available(run), check_pc_tunnel_config_dir(conf_dir), check_tailscale(run), check_disk_space()]
+
+def run_all(
+    conf_dir: Path = PC_TUNNEL_CONF_DIR, ssh_user: str = "sepisotoni", run=_run
+) -> list:
+    checks = [
+        check_systemd_available(run),
+        check_pc_tunnel_config_dir(conf_dir),
+        check_tailscale(run),
+        check_disk_space(),
+    ]
 
     pcs = discover_pcs(conf_dir)
     for name, pc_ip, port in pcs:
@@ -248,30 +323,52 @@ def run_all(conf_dir: Path = PC_TUNNEL_CONF_DIR, ssh_user: str = "sepisotoni", r
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     ap.add_argument("--json", action="store_true", help="machine-readable JSON output")
-    ap.add_argument("--conf-dir", default=str(PC_TUNNEL_CONF_DIR), help="pc-tunnel conf directory (default: /etc/pc-tunnel)")
-    ap.add_argument("--ssh-user", default="sepisotoni", help="user to test SSH reachability as (default: sepisotoni)")
+    ap.add_argument(
+        "--conf-dir",
+        default=str(PC_TUNNEL_CONF_DIR),
+        help="pc-tunnel conf directory (default: /etc/pc-tunnel)",
+    )
+    ap.add_argument(
+        "--ssh-user",
+        default="sepisotoni",
+        help="user to test SSH reachability as (default: sepisotoni)",
+    )
     args = ap.parse_args()
 
     checks = run_all(Path(args.conf_dir), args.ssh_user)
     failed = [c for c in checks if c["status"] == FAIL]
 
     if args.json:
-        print(json.dumps({"checks": checks, "summary": {
-            "pass": sum(1 for c in checks if c["status"] == PASS),
-            "fail": len(failed),
-            "skipped": sum(1 for c in checks if c["status"] == SKIPPED),
-            "not_configured": sum(1 for c in checks if c["status"] == NOT_CONFIGURED),
-        }}, indent=2))
+        print(
+            json.dumps(
+                {
+                    "checks": checks,
+                    "summary": {
+                        "pass": sum(1 for c in checks if c["status"] == PASS),
+                        "fail": len(failed),
+                        "skipped": sum(1 for c in checks if c["status"] == SKIPPED),
+                        "not_configured": sum(
+                            1 for c in checks if c["status"] == NOT_CONFIGURED
+                        ),
+                    },
+                },
+                indent=2,
+            )
+        )
     else:
         width = max((len(c["name"]) for c in checks), default=20)
         for c in checks:
             print(f"[{c['status']:>14}] {c['name']:<{width}}  {c['detail']}")
         print()
-        print(f"{sum(1 for c in checks if c['status']==PASS)} passed, {len(failed)} failed, "
-              f"{sum(1 for c in checks if c['status']==SKIPPED)} skipped, "
-              f"{sum(1 for c in checks if c['status']==NOT_CONFIGURED)} not configured")
+        print(
+            f"{sum(1 for c in checks if c['status'] == PASS)} passed, {len(failed)} failed, "
+            f"{sum(1 for c in checks if c['status'] == SKIPPED)} skipped, "
+            f"{sum(1 for c in checks if c['status'] == NOT_CONFIGURED)} not configured"
+        )
 
     sys.exit(1 if failed else 0)
 
