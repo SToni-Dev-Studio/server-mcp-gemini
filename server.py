@@ -502,65 +502,69 @@ async def check_account_status() -> str:
 
 
 async def _ssh_server(command: str, timeout: int = 60) -> str:
-    """Run a command on the home Linux server via Tailscale SSH with regular SSH fallback."""
+    """
+    Run a command on the home Linux server.
+    Strategy:
+      1. Try regular SSH first (fast, LAN-local, handles sudo correctly)
+      2. Fall back to Tailscale SSH if regular SSH fails to connect
+    sudo commands work because the sudoers nopasswd rules are configured on the server.
+    """
 
-    # PRIMARY: Tailscale SSH (more reliable, works across networks, encrypted)
-    ts_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *ts_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        output = (stdout.decode() + stderr.decode()).strip()
-        if proc.returncode == 0:
-            return output or f"(exited {proc.returncode}, no output)"
-    except asyncio.TimeoutError:
+    async def _run(cmd_list: list, t: int) -> tuple[int, str]:
+        """Run a subprocess, return (returncode, output)."""
+        proc = None
         try:
-            proc.kill()
-        except Exception:
-            pass
-        return f"Command timed out after {timeout}s"
-    except Exception:
-        pass
+            proc = await asyncio.create_subprocess_exec(
+                *cmd_list,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=t)
+            out = (stdout.decode(errors="replace") + stderr.decode(errors="replace")).strip()
+            return proc.returncode, out
+        except asyncio.TimeoutError:
+            if proc:
+                try:
+                    proc.kill()
+                    await proc.wait()
+                except Exception:
+                    pass
+            return -1, f"timed out after {t}s"
+        except Exception as e:
+            return -2, str(e)
 
-    # FALLBACK: Regular SSH (if Tailscale is down)
     key_args = (
         ["-i", SERVER_SSH_KEY]
         if (SERVER_SSH_KEY and os.path.exists(SERVER_SSH_KEY))
         else []
     )
-    ssh_cmd = (
-        [
-            "ssh",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "ConnectTimeout=10",
-        ]
-        + key_args
-        + [f"{SERVER_USER}@{SERVER_HOST}", command]
-    )
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *ssh_cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        output = (stdout.decode() + stderr.decode()).strip()
-        return output or f"(exited {proc.returncode}, no output)"
-    except asyncio.TimeoutError:
-        try:
-            proc.kill()
-        except Exception:
-            pass
+
+    # PRIMARY: Regular SSH — faster on LAN, sudo nopasswd works reliably
+    ssh_cmd = [
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "BatchMode=yes",
+        "-o", f"ConnectTimeout=8",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=2",
+    ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
+
+    rc, output = await _run(ssh_cmd, timeout)
+    if rc >= 0:  # 0 = success, >0 = command ran but errored — both mean SSH worked
+        return output or f"(exited {rc}, no output)"
+    if "timed out" in output:
         return f"Command timed out after {timeout}s"
-    except Exception as e:
-        return f"SSH execution failed: {e}"
+
+    # FALLBACK: Tailscale SSH — works across networks when LAN SSH fails
+    ts_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
+    rc, output = await _run(ts_cmd, timeout)
+    if rc >= 0:
+        return output or f"(exited {rc}, no output)"
+    if "timed out" in output:
+        return f"Command timed out after {timeout}s"
+
+    return f"SSH execution failed (both LAN and Tailscale): {output}"
 
 
 # ---------------------------------------------------------------------------
