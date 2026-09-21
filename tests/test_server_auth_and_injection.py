@@ -269,7 +269,7 @@ async def test_write_codespace_file_content_is_base64_safe(srv_with_captured_exe
     await srv.write_codespace_file("my-codespace", "/tmp/dest.txt", evil_content)
     codespace_name, cmd = captured[-1]
     assert "touch /tmp/PWNED" not in cmd  # never appears as literal shell syntax
-    import base64, re
+    import re
     m = re.search(r"echo '?([A-Za-z0-9+/=]+)'? \| base64", cmd)
     assert m, f"could not find base64 payload in command: {cmd!r}"
 

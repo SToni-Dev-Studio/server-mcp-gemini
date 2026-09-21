@@ -1156,9 +1156,9 @@ async def pc_list(include_offline: bool = False) -> str:
                 f"IP: {pc.get('lan_ip')}:{pc.get('port')} | Status: {pc.get('status')} | Version: {pc.get('version', '?')}"
             )
         return "**Auto-Detected PCs:**\n" + "\n".join(lines)
-    except Exception as e:
+    except Exception:
         lines = [f"- **{name}** (configured fallback, port {cfg.get('port')})" for name, cfg in sorted(_PC_REGISTRY.items())]
-        return f"**Configured PCs (fallback mode):**\n" + "\n".join(lines)
+        return "**Configured PCs (fallback mode):**\n" + "\n".join(lines)
 
 
 @mcp.tool()

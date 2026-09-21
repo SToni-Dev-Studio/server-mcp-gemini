@@ -18,7 +18,6 @@ import os
 import sys
 import importlib
 
-import pytest
 from starlette.testclient import TestClient
 
 # server.py's admin cookie is Secure (correctly -- Render/Fly serve HTTPS

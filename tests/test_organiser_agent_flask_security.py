@@ -11,7 +11,6 @@ leaks state between tests or into whatever real $HOME this sandbox has.
 import importlib.util
 import os
 import shutil
-import sys
 import tempfile
 
 import pytest

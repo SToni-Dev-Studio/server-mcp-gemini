@@ -47,8 +47,6 @@ import os
 import shutil
 import socket
 import subprocess
-import sys
-import tempfile
 import time
 
 import pytest
@@ -193,7 +191,7 @@ def test_working_dir_injection_is_closed_on_real_windows(running_windows_agent, 
     os.makedirs(legit_dir, exist_ok=True)
     marker_path = os.path.join(legit_dir, "PWNED_MARKER.txt")
 
-    payload_working_dir = f'C:\\wine-test-legit-dir" & echo INJECTED > C:\\wine-test-legit-dir\\PWNED_MARKER.txt & echo "'
+    payload_working_dir = 'C:\\wine-test-legit-dir" & echo INJECTED > C:\\wine-test-legit-dir\\PWNED_MARKER.txt & echo "'
     status, body = _post(base, "/run_command", {
         "command": "echo should_not_matter", "working_dir": payload_working_dir,
     })
