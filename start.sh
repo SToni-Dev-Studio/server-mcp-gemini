@@ -1,14 +1,7 @@
 #!/bin/bash
 set -e
 
-if [ -n "$TAILSCALE_AUTH_KEY" ]; then
-    echo "Setting up Tailscale..."
-    tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
-    sleep 3
-    tailscale up --authkey="${TAILSCALE_AUTH_KEY}" --hostname=render-mcp --accept-routes 2>/dev/null || true
-    echo "Tailscale connected: $(tailscale ip 2>/dev/null || echo 'pending')"
-fi
-
+# Write SSH key immediately
 if [ -n "$SSH_PRIVATE_KEY" ]; then
     mkdir -p /tmp
     echo "$SSH_PRIVATE_KEY" > /tmp/render_mcp_key
@@ -16,5 +9,16 @@ if [ -n "$SSH_PRIVATE_KEY" ]; then
     echo "SSH key written."
 fi
 
-exec python server.py
+# Start Tailscale in background - don't block server startup
+if [ -n "$TAILSCALE_AUTH_KEY" ]; then
+    (
+        echo "Setting up Tailscale in background..."
+        tailscaled --tun=userspace-networking --socks5-server=localhost:1055 &
+        sleep 5
+        tailscale up --authkey="${TAILSCALE_AUTH_KEY}" --hostname=render-mcp --accept-routes 2>/dev/null || true
+        echo "Tailscale connected: $(tailscale ip 2>/dev/null || echo 'pending')"
+    ) &
+fi
 
+# Start server immediately - don't wait for Tailscale
+exec python server.py
