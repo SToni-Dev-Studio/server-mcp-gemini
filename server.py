@@ -458,43 +458,6 @@ async def _gh_request_with_fallback(
     return resp.json() if resp.content else {}
 
 
-@mcp.tool()
-async def check_account_status() -> str:
-    """Check validity and user identities for primary, secondary, and tertiary GitHub tokens."""
-    results = []
-    tokens_to_check = [
-        ("primary", os.environ.get("GITHUB_TOKEN", "").strip()),
-        ("secondary", os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()),
-        ("tertiary", os.environ.get("GITHUB_TOKEN_TERTIARY", "").strip()),
-    ]
-
-    async with httpx.AsyncClient() as client:
-        for label, token in tokens_to_check:
-            if not token:
-                results.append(f"• **{label.capitalize()} Token**: Not configured.")
-                continue
-            try:
-                resp = await client.get(
-                    f"{GITHUB_API}/user", headers=_gh_headers(token), timeout=15
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    login = data.get("login", "unknown")
-                    name = data.get("name") or login
-                    results.append(
-                        f"• **{label.capitalize()} Token**: ✅ Active (User: `{login}` - {name})"
-                    )
-                else:
-                    results.append(
-                        f"• **{label.capitalize()} Token**: ❌ Invalid/Expired (HTTP {resp.status_code})"
-                    )
-            except Exception as e:
-                results.append(
-                    f"• **{label.capitalize()} Token**: ⚠️ Network error ({type(e).__name__})"
-                )
-
-    return "\n".join(results)
-
 
 # ---------------------------------------------------------------------------
 # SSH Helper for Linux Server
@@ -572,105 +535,10 @@ async def _ssh_server(command: str, timeout: int = 60) -> str:
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def list_codespaces(account: str = "auto") -> str:
-    """List caller's GitHub Codespaces: name, repo, state, and machine spec."""
-    data = await _gh_request_with_fallback("GET", "/user/codespaces", account=account)
-    lines = []
-    for cs in data.get("codespaces", []):
-        lines.append(
-            f"- {cs['name']} | repo: {cs['repository']['full_name']} | "
-            f"state: {cs['state']} | machine: {cs['machine']['display_name']}"
-        )
-    return "\n".join(lines) if lines else "No codespaces found."
 
 
-@mcp.tool()
-async def create_codespace(
-    repo_full_name: str,
-    branch: str = "main",
-    machine_type: str = "",
-    account: str = "auto",
-) -> str:
-    """
-    Create a new codespace for a given repository.
-    machine_type — optional (e.g. 'standardLinux32Gb', 'premiumLinux'); left
-    blank uses the repo's default. Use this for AI/heavy workloads too —
-    just pass a bigger machine_type, then use exec_command to install
-    whatever you need (Ollama, etc.) once it's up.
-    """
-    body = {"ref": branch}
-    if machine_type:
-        body["machine"] = machine_type
-    data = await _gh_request_with_fallback(
-        "POST",
-        f"/repos/{repo_full_name}/codespaces",
-        json_body=body,
-        account=account,
-    )
-    return f"Created codespace '{data.get('name')}' (state: {data.get('state')})"
 
 
-@mcp.tool()
-async def start_codespace(codespace_name: str, account: str = "auto") -> str:
-    """Start a stopped/shutdown codespace by name and wait for it to become Available."""
-    try:
-        data = await _gh_request_with_fallback(
-            "POST", f"/user/codespaces/{codespace_name}/start", account=account
-        )
-        state = data.get("state", "starting")
-    except Exception as e:
-        return f"Failed to start codespace '{codespace_name}': {e}"
-
-    if state in ("Available", "Running"):
-        return f"Codespace '{codespace_name}' is now running."
-
-    # Poll for up to 30 seconds until Available
-    for _ in range(15):
-        await asyncio.sleep(2)
-        try:
-            info = await _gh_request_with_fallback(
-                "GET", f"/user/codespaces/{codespace_name}", account=account
-            )
-            curr_state = info.get("state", "")
-            if curr_state in ("Available", "Running"):
-                return f"Codespace '{codespace_name}' started successfully and is now Available."
-        except Exception:
-            pass
-
-    return f"Start requested for '{codespace_name}'. Current state: {state}."
-
-
-@mcp.tool()
-async def stop_codespace(codespace_name: str, account: str = "auto") -> str:
-    """Stop a running codespace by name."""
-    await _gh_request_with_fallback(
-        "POST", f"/user/codespaces/{codespace_name}/stop", account=account
-    )
-    return f"Stop requested for '{codespace_name}'."
-
-
-@mcp.tool()
-async def rebuild_codespace(codespace_name: str, account: str = "auto") -> str:
-    """Trigger a full devcontainer rebuild inside a codespace."""
-    data = await _gh_request_with_fallback(
-        "POST", f"/user/codespaces/{codespace_name}/rebuild", account=account
-    )
-    return f"Rebuild initiated for '{codespace_name}'. State: {data.get('state', 'queued')}"
-
-
-@mcp.tool()
-async def set_machine_type(
-    codespace_name: str, machine_type: str, account: str = "auto"
-) -> str:
-    """Scale machine specs (e.g. 'standardLinux32Gb' or 'premiumLinux')."""
-    await _gh_request_with_fallback(
-        "PATCH",
-        f"/user/codespaces/{codespace_name}",
-        json_body={"machine": machine_type},
-        account=account,
-    )
-    return f"Machine updated to '{machine_type}' for '{codespace_name}'."
 
 
 # ---------------------------------------------------------------------------
@@ -752,48 +620,7 @@ async def exec_command(
     return output or f"(command exited {returncode}, no output)"
 
 
-@mcp.tool()
-async def read_codespace_file(
-    codespace_name: str, file_path: str, account: str = "auto"
-) -> str:
-    """Read contents of a remote file in the codespace."""
-    return await exec_command(
-        codespace_name, f"cat {_q(file_path)}", timeout_seconds=15, account=account
-    )
 
-
-@mcp.tool()
-async def write_codespace_file(
-    codespace_name: str, file_path: str, content: str, account: str = "auto"
-) -> str:
-    """Safely write/overwrite content to a file in the codespace using base64 encoding."""
-    b64_content = base64.b64encode(content.encode("utf-8")).decode("utf-8")
-    # mkdir -p the parent dir (a write to a not-yet-existing subdirectory
-    # used to fail silently) and check for an explicit success marker
-    # instead of unconditionally reporting success regardless of outcome
-    # (found by agent/docs-release while writing docs against real
-    # behavior -- this tool previously always said "Successfully wrote..."
-    # even when the write failed).
-    cmd = f"mkdir -p $(dirname {_q(file_path)}) && echo {_q(b64_content)} | base64 -d > {_q(file_path)} && echo __WRITE_OK__"
-    result = await exec_command(
-        codespace_name, cmd, timeout_seconds=15, account=account
-    )
-    if "__WRITE_OK__" not in result:
-        return f"Write failed for '{file_path}': {result}"
-    return f"Successfully wrote {len(content)} characters to '{file_path}'."
-
-
-@mcp.tool()
-async def list_workspace_files(
-    codespace_name: str, path: str = ".", account: str = "auto"
-) -> str:
-    """List directory contents or file tree inside the codespace."""
-    return await exec_command(
-        codespace_name,
-        f"find {_q(path)} -maxdepth 2 -not -path '*/.*'",
-        timeout_seconds=15,
-        account=account,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -801,101 +628,13 @@ async def list_workspace_files(
 # ---------------------------------------------------------------------------
 
 
-@mcp.tool()
-async def get_git_status(
-    codespace_name: str, repo_path: str = ".", account: str = "auto"
-) -> str:
-    """Get concise git status and branch info in the codespace working directory."""
-    return await exec_command(
-        codespace_name,
-        f"cd {_q(repo_path)} && git status --short -b",
-        timeout_seconds=15,
-        account=account,
-    )
 
-
-@mcp.tool()
-async def create_git_commit_and_push(
-    codespace_name: str,
-    commit_message: str,
-    repo_path: str = ".",
-    branch: str = "",
-    account: str = "auto",
-) -> str:
-    """Stage tracked changes, commit, and push to remote."""
-    push_args = f"origin {_q(branch)}" if branch else ""
-    cmd = f"cd {_q(repo_path)} && git add -u && git commit -m {_q(commit_message)} && git push {push_args}"
-    return await exec_command(codespace_name, cmd, timeout_seconds=30, account=account)
-
-
-@mcp.tool()
-async def list_forwarded_ports(codespace_name: str, account: str = "auto") -> str:
-    """List currently forwarded network ports and dev server addresses."""
-    # A3 fix: the old implementation SSHed *into* the codespace and ran
-    # `gh codespace ports -c <name>` there — which requires gh installed
-    # and authenticated inside the container (rarely true) and queries
-    # the wrong side. The correct approach is to hit the GitHub API from
-    # this server, which already has credentials.
-    data = await _gh_request_with_fallback(
-        "GET", f"/user/codespaces/{codespace_name}/ports", account=account
-    )
-    ports = data.get("ports", [])
-    if not ports:
-        return f"No forwarded ports found for '{codespace_name}'."
-    lines = []
-    for p in ports:
-        label = p.get("label") or p.get("name") or ""
-        port_num = p.get("port_number", "?")
-        visibility = p.get("visibility", "?")
-        browse_url = p.get("browser_url") or p.get("preview_url") or ""
-        line = f"- Port {port_num}"
-        if label:
-            line += f" ({label})"
-        line += f"  visibility={visibility}"
-        if browse_url:
-            line += f"  url={browse_url}"
-        lines.append(line)
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
 # Server Management Tools
 # ---------------------------------------------------------------------------
 
-
-@mcp.tool()
-async def server_status(
-    disk_detail: bool = False, disk_path: str = "/", processes: bool = False
-) -> str:
-    """
-    Get an overview of the home Linux server: disk, RAM, and (optionally)
-    a detailed disk breakdown and/or top processes.
-
-    disk_detail=True  -- add a `du`-based largest-first breakdown of disk_path
-    disk_path          -- which path to break down when disk_detail=True (default: /)
-    processes=True     -- add top CPU/RAM consuming processes (was server_process_list)
-
-    Folds in what used to be the separate server_disk_usage and
-    server_process_list tools -- pass the flags above instead of calling
-    a different tool. The old per-service (Sonarr/qBittorrent/etc)
-    service check was removed along with that unused download-automation
-    feature entirely, not just relocated.
-    """
-    disk = await _ssh_server("df -h / /mnt/ssd 2>/dev/null | tail -2")
-    ram = await _ssh_server("free -h | grep Mem")
-    parts = [f"**Disk:**\n{disk}", f"**RAM:**\n{ram}"]
-
-    if disk_detail:
-        breakdown = await _ssh_server(
-            f"du -h --max-depth=2 {_q(disk_path)} 2>/dev/null | sort -rh | head -30"
-        )
-        parts.append(f"**Disk breakdown of {disk_path}:**\n{breakdown}")
-
-    if processes:
-        top = await _ssh_server("ps aux --sort=-%cpu | head -20")
-        parts.append(f"**Top processes:**\n{top}")
-
-    return "\n\n".join(parts)
 
 
 @mcp.tool()
@@ -915,131 +654,15 @@ async def server_run_command(command: str) -> str:
     return await _ssh_server(command)
 
 
-@mcp.tool()
-async def server_list_files(path: str, recursive: bool = False) -> str:
-    """
-    List files and directories at a path on the Linux server.
-    recursive=True walks subdirectories (up to depth 3, can be slow).
-    """
-    if recursive:
-        cmd = f"find {_q(path)} -maxdepth 3 -not -path '*/.*' | sort | head -200"
-    else:
-        cmd = f"ls -lhA {_q(path)} 2>&1 | head -100"
-    return await _ssh_server(cmd)
 
 
-@mcp.tool()
-async def server_read_file(path: str, tail: int = 0, head: int = 0) -> str:
-    """
-    Read a file on the Linux server.
-    tail=N  — show last N lines (great for logs).
-    head=N  — show first N lines.
-    Neither set — show up to 200 lines from the start.
-    """
-    if tail:
-        cmd = f"tail -n {_q(tail)} {_q(path)} 2>&1"
-    elif head:
-        cmd = f"head -n {_q(head)} {_q(path)} 2>&1"
-    else:
-        cmd = f"head -n 200 {_q(path)} 2>&1"
-    return await _ssh_server(cmd)
 
 
-@mcp.tool()
-async def server_write_file(path: str, content: str) -> str:
-    """
-    Write (overwrite) a file on the Linux server.
-    Content is base64-encoded for safe transfer.
-    Use with care — this replaces existing content.
-    """
-    encoded = base64.b64encode(content.encode()).decode()
-    cmd = f"echo {_q(encoded)} | base64 -d > {_q(path)} && echo 'OK'"
-    result = await _ssh_server(cmd)
-    return f"Written to '{path}': {result}"
 
 
-@mcp.tool()
-async def server_move_file(source: str, destination: str) -> str:
-    """Move or rename a file/directory on the Linux server."""
-    return await _ssh_server(f"mv {_q(source)} {_q(destination)} && echo 'Moved OK'")
 
 
-@mcp.tool()
-async def server_delete_file(path: str) -> str:
-    """
-    Delete a file (not a directory) on the Linux server.
-    For directories use server_run_command with rm -rf carefully.
-    """
-    return await _ssh_server(f"rm {_q(path)} && echo 'Deleted OK'")
 
-
-@mcp.tool()
-async def server_service_control(service: str, action: str) -> str:
-    """
-    Start, stop, restart, or check status of a systemd service on the Linux server.
-    action — one of: start | stop | restart | status | enable | disable
-    """
-    allowed_actions = {"start", "stop", "restart", "status", "enable", "disable"}
-    if action not in allowed_actions:
-        return f"Invalid action '{action}'. Use one of: {', '.join(allowed_actions)}"
-    return await _ssh_server(f"sudo systemctl {action} {_q(service)} 2>&1")
-
-
-@mcp.tool()
-async def server_tail_log(log_path: str, lines: int = 50) -> str:
-    """
-    Tail any log file on the Linux server.
-    Common paths: /var/log/syslog, /var/log/nginx/error.log, /var/log/plex-download.log
-    """
-    return await _ssh_server(f"tail -n {_q(lines)} {_q(log_path)} 2>&1")
-
-
-@mcp.tool()
-async def server_cron_list() -> str:
-    """List all cron jobs on the Linux server (user + root)."""
-    user_cron = await _ssh_server("crontab -l 2>/dev/null || echo '(no user crontab)'")
-    root_cron = await _ssh_server(
-        "sudo crontab -l 2>/dev/null || echo '(no root crontab)'"
-    )
-    system_cron = await _ssh_server(
-        "ls /etc/cron.d/ 2>/dev/null && cat /etc/cron.d/* 2>/dev/null | head -60"
-    )
-    return f"**User crontab:**\n{user_cron}\n\n**Root crontab:**\n{root_cron}\n\n**System cron.d:**\n{system_cron}"
-
-
-@mcp.tool()
-async def server_network_info() -> str:
-    """Show network interfaces, open ports, and active connections on the Linux server."""
-    interfaces = await _ssh_server("ip -brief addr")
-    ports = await _ssh_server("ss -tlnp 2>/dev/null | head -30")
-    connections = await _ssh_server("ss -tnp state established 2>/dev/null | head -20")
-    return f"**Interfaces:**\n{interfaces}\n\n**Listening ports:**\n{ports}\n\n**Active connections:**\n{connections}"
-
-
-@mcp.tool()
-async def server_docker_status() -> str:
-    """List Docker containers and their status on the Linux server (if Docker is installed)."""
-    containers = await _ssh_server(
-        "docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}' 2>&1"
-    )
-    images = await _ssh_server(
-        "docker images --format 'table {{.Repository}}\t{{.Tag}}\t{{.Size}}' 2>&1 | head -20"
-    )
-    return f"**Containers:**\n{containers}\n\n**Images:**\n{images}"
-
-
-@mcp.tool()
-async def server_find_duplicates(path: str) -> str:
-    """
-    Find duplicate files on the Linux server by content hash (MD5).
-    Scans the given path recursively. Can be slow on large directories.
-    """
-    cmd = (
-        f"find {_q(path)} -type f -exec md5sum {{}} \\; 2>/dev/null "
-        "| sort | awk 'seen[$1]++{print $2, \"DUPLICATE OF\", prev[$1]} {prev[$1]=$2}' | head -40"
-    )
-    result = await _ssh_server(cmd)
-    return result or "No duplicates found."
 
 
 # ---------------------------------------------------------------------------
@@ -1156,192 +779,12 @@ async def _org_post(path: str, body: dict, pc: str = "default") -> dict:
     return _parse_organiser_response(raw)
 
 
-@mcp.tool()
-async def pc_list_configured() -> str:
-    """
-    List every PC configured in the PCS registry, with LIVE reachability
-    status (each PC's own /status is polled concurrently, 3s timeout per
-    PC so one down machine doesn't slow down the whole call). Secrets
-    are never shown.
-
-    Per coordination/proposals/pc-autodiscovery-2026-09-18.md section 1
-    (user request, relayed and scoped by agent/docs-release): the old
-    version only echoed the static PCS registry, so a PC being down was
-    invisible until some other tool call against it failed. This shows
-    reachability, the PC's own reported name (its Windows hostname by
-    default -- see organiser-agent's machine_name/GetComputerNameA
-    fallback), version, and platform up front.
-    """
-    if not _PC_REGISTRY:
-        return "No PCs configured."
-
-    async def _check_one(name: str, entry: dict) -> str:
-        port = entry.get("port")
-        try:
-            data = await asyncio.wait_for(_org_get("/status", pc=name), timeout=3.0)
-            reported_name = data.get("machine_name") or data.get("machine_id", "?")
-            version = data.get("version", "?")
-            platform = data.get("platform", "?")
-            return f'- {name} (port {port})  ✅ reachable  name="{reported_name}"  {version}  {platform}'
-        except asyncio.TimeoutError:
-            return f"- {name} (port {port})  ⚠️ unreachable (timeout after 3s)"
-        except Exception as e:
-            return f"- {name} (port {port})  ⚠️ unreachable ({e})"
-
-    names = sorted(_PC_REGISTRY.keys())
-    results = await asyncio.gather(
-        *[_check_one(name, _PC_REGISTRY[name]) for name in names],
-        return_exceptions=False,  # _check_one already catches everything itself
-    )
-    reachable_count = sum(1 for r in results if "✅" in r)
-    header = f"PC Registry ({len(names)} configured, {reachable_count} reachable):\n"
-    return header + "\n".join(results)
 
 
-@mcp.tool()
-async def pc_organiser_status(pc: str = "default") -> str:
-    """
-    Check whether organiser-agent.exe is reachable on the given PC, routed
-    through the Linux server (tailscale ssh → loopback tunnel → PC).
-    Returns its version and platform. Use pc_list_configured to see valid
-    `pc` names.
-    """
-    try:
-        data = await _org_get("/status", pc=pc)
-        return (
-            f"✅ '{pc}' reachable via {SERVER_HOST} → loopback:{_resolve_pc(pc)['port']}\n"
-            f"Version : {data.get('version', '?')}\n"
-            f"Platform: {data.get('platform', '?')}"
-        )
-    except Exception as e:
-        return (
-            f"❌ Could not reach organiser agent '{pc}': {e}\n\n"
-            "Checklist:\n"
-            "  1. Is organiser-agent.exe running on that PC (Task Scheduler)?\n"
-            f"  2. Is pc-tunnel@{pc}.service active on the Linux server?\n"
-            f"     (sudo systemctl status pc-tunnel@{pc})\n"
-            "  3. Is the Linux server itself reachable over Tailscale right now?"
-        )
 
 
-@mcp.tool()
-async def pc_list_files(
-    folder: str, recursive: bool = False, pc: str = "default"
-) -> str:
-    """
-    List files and folders inside a directory on a PC.
-    Returns name, size, extension, and last-modified for each entry.
-    """
-    data = await _org_get(
-        "/list", {"folder": folder, "recursive": str(recursive).lower()}, pc=pc
-    )
-    entries = data.get("entries", [])
-    if not entries:
-        return f"No files found in '{folder}' (or path doesn't exist)."
-    lines = []
-    for e in entries:
-        kind = "DIR " if e.get("is_dir") else "FILE"
-        size = e.get("size_bytes", 0)
-        lines.append(
-            f"[{kind}] {e.get('path')} ({size:,} bytes) modified {e.get('modified', '?')}"
-        )
-    return "\n".join(lines)
 
 
-@mcp.tool()
-async def pc_move_file(source: str, destination: str, pc: str = "default") -> str:
-    """Move (or rename) a file or folder on a PC. Parent directories are created automatically."""
-    data = await _org_post(
-        "/move", {"source": source, "destination": destination}, pc=pc
-    )
-    return data.get("message", f"Moved '{source}' → '{destination}'")
-
-
-@mcp.tool()
-async def pc_delete_file(
-    path: str, permanent: bool = False, pc: str = "default"
-) -> str:
-    """
-    Delete a file or empty folder on a PC. By default sends to the Recycle
-    Bin / Trash (safe). Set permanent=True only when explicitly asked to
-    permanently delete.
-    """
-    data = await _org_post("/delete", {"path": path, "permanent": permanent}, pc=pc)
-    return data.get("message", f"Deleted '{path}'")
-
-
-_PC_PREVIEW_MAX_BYTES_CEILING = 2_000_000  # 2 MB
-
-
-@mcp.tool()
-async def pc_read_file_preview(
-    path: str, max_bytes: int = 4096, pc: str = "default"
-) -> str:
-    """Read the first max_bytes bytes of a text file on a PC. Useful for peeking before deciding what to do with it."""
-    # Clamp rather than pass through: organiser-agent's /preview allocates
-    # max_bytes BEFORE checking the real file size, so an uncapped value
-    # here (e.g. 10_000_000_000) can be used to trigger a memory-exhaustion
-    # crash on the PC from a single MCP tool call (security-qa finding 4).
-    # This clamp is the server.py-side half of the fix; the real fix is a
-    # bounds check inside organiser-agent.cpp itself (pc-agent's scope).
-    if max_bytes <= 0:
-        max_bytes = 4096
-    max_bytes = min(max_bytes, _PC_PREVIEW_MAX_BYTES_CEILING)
-    data = await _org_get("/preview", {"path": path, "max_bytes": max_bytes}, pc=pc)
-    return data.get("content", "(empty or binary file)")
-
-
-@mcp.tool()
-async def pc_list(include_offline: bool = False) -> str:
-    """
-    List auto-detected PCs and their live status (online/offline, IP, port, version, machine_id).
-    Queries the Linux hub's PC registry (Proposal pc-autodiscovery-v2).
-    By default, only shows currently online PCs (`include_offline=False`).
-    """
-    try:
-        flag = "true" if include_offline else "false"
-        out = await _ssh_server(
-            f"curl -s 'http://127.0.0.1:7845/pcs?include_offline={flag}' 2>&1",
-            timeout=10,
-        )
-        data = json.loads(out)
-        pcs = data.get("pcs", [])
-        if not pcs:
-            if not include_offline:
-                return "No online PCs currently detected. (Pass `include_offline=True` to include offline PCs)."
-            lines = [
-                f"- **{name}** (configured fallback, port {cfg.get('port')})"
-                for name, cfg in sorted(_PC_REGISTRY.items())
-            ]
-            return "**Registered PCs:**\n" + "\n".join(lines)
-        lines = []
-        for pc in pcs:
-            status_icon = "🟢" if pc.get("status") == "online" else "🔴"
-            lines.append(
-                f"{status_icon} **{pc.get('machine_name')}** ({pc.get('machine_id', '?')}) — "
-                f"IP: {pc.get('lan_ip')}:{pc.get('port')} | Status: {pc.get('status')} | Version: {pc.get('version', '?')}"
-            )
-        return "**Auto-Detected PCs:**\n" + "\n".join(lines)
-    except Exception:
-        lines = [
-            f"- **{name}** (configured fallback, port {cfg.get('port')})"
-            for name, cfg in sorted(_PC_REGISTRY.items())
-        ]
-        return "**Configured PCs (fallback mode):**\n" + "\n".join(lines)
-
-
-@mcp.tool()
-async def pc_disk_usage(folder: str, pc: str = "default") -> str:
-    """Return a breakdown of disk usage inside a folder on a PC, sorted largest-first."""
-    data = await _org_get("/disk_usage", {"folder": folder}, pc=pc)
-    items = data.get("items", [])
-    lines = [f"{i.get('size_human', '?'):>10}  {i.get('path')}" for i in items]
-    total = data.get("total_human", "?")
-    return (
-        f"**{folder}** — total: {total}\n" + "\n".join(lines)
-        if lines
-        else f"'{folder}' appears empty."
-    )
 
 
 @mcp.tool()
@@ -1362,50 +805,6 @@ async def pc_run_command(
     return f"[exit {rc}]\n{output}" if output else f"[exit {rc}] (no output)"
 
 
-@mcp.tool()
-async def pc_find_duplicates(folder: str, pc: str = "default") -> str:
-    """Scan a folder on a PC for duplicate files (by content hash). Returns groups of identical files."""
-    data = await _org_get("/duplicates", {"folder": folder}, pc=pc)
-    groups = data.get("groups", [])
-    if not groups:
-        return "No duplicates found."
-    lines = []
-    for g in groups:
-        lines.append(
-            f"{g.get('count')}× {g.get('size_human')} each, wasting {g.get('wasted_human')}:"
-        )
-        for f in g.get("files", []):
-            lines.append(f"  - {f}")
-    return "\n".join(lines)
-
-
-@mcp.tool()
-async def pc__screenshot(save_path: str = "", pc: str = "default") -> str:
-    """
-    Capture a screenshot of a PC's screen. Returns base64-encoded image data
-    so you can view/analyse it. save_path — optional path on that PC to
-    also save the file.
-    """
-    body: dict = {}
-    if save_path:
-        body["save_path"] = save_path
-    data = await _org_post("/screenshot", body, pc=pc)
-    b64 = data.get("image_base64", "")
-    path = data.get("saved_path", "")
-    size = data.get("size", "")
-    if not b64:
-        return data.get("error", "Screenshot failed — no image returned.")
-    # A1 fix: the C++ agent produces BMP bytes (not PNG), and the correct
-    # mime type is image/bmp. The previous code also truncated the payload
-    # to 200 base64 chars, making the image unusable. Return full data.
-    mime = data.get("format", "bmp")
-    mime_type = f"image/{mime}"
-    return (
-        f"Screenshot captured ({size}).\n"
-        f"{'Saved to: ' + path if path else ''}\n"
-        f"base64_length={len(b64)}\n"
-        f"data:{mime_type};base64,{b64}"
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -1643,6 +1042,513 @@ async def _location_write_bytes(loc: str, data: bytes) -> str:
         return f"codespace:{cs_name}:{path} ({len(data)} bytes)"
 
     raise AssertionError("unreachable")
+
+
+
+
+# ===========================================================================
+# CONSOLIDATED TOOLS (40 → 15)
+# ===========================================================================
+
+# ===========================================================================
+# CONSOLIDATED MCP TOOLS
+# 40 tools → 14 tools
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# 1. github_account_status  (was: check_account_status)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def github_account_status() -> str:
+    """Check validity and user identities for all configured GitHub tokens (primary, secondary, tertiary)."""
+    results = []
+    tokens_to_check = [
+        ("primary", os.environ.get("GITHUB_TOKEN", "").strip()),
+        ("secondary", os.environ.get("GITHUB_TOKEN_SECONDARY", "").strip()),
+        ("tertiary", os.environ.get("GITHUB_TOKEN_TERTIARY", "").strip()),
+    ]
+    async with httpx.AsyncClient() as client:
+        for label, token in tokens_to_check:
+            if not token:
+                results.append(f"• **{label.capitalize()} Token**: Not configured.")
+                continue
+            try:
+                resp = await client.get(f"{GITHUB_API}/user", headers=_gh_headers(token), timeout=15)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    login = data.get("login", "unknown")
+                    name = data.get("name") or login
+                    scopes = resp.headers.get("X-OAuth-Scopes", "unknown")
+                    results.append(f"• **{label.capitalize()} Token**: ✅ Active (User: `{login}` / {name}, scopes: {scopes})")
+                else:
+                    results.append(f"• **{label.capitalize()} Token**: ❌ Invalid/Expired (HTTP {resp.status_code})")
+            except Exception as e:
+                results.append(f"• **{label.capitalize()} Token**: ⚠️ Error ({type(e).__name__})")
+    return "\n".join(results)
+
+
+# ---------------------------------------------------------------------------
+# 2. codespace_manage  (was: list/create/start/stop/rebuild/set_machine_type)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def codespace_manage(
+    action: str,
+    codespace_name: str = "",
+    repo_full_name: str = "",
+    branch: str = "main",
+    machine_type: str = "",
+    account: str = "auto",
+) -> str:
+    """
+    Manage GitHub Codespaces lifecycle.
+    action: list | create | start | stop | rebuild | set_machine
+      list        — show all codespaces (name, repo, state, machine)
+      create      — requires repo_full_name; optional branch, machine_type
+      start       — requires codespace_name; polls until Available
+      stop        — requires codespace_name
+      rebuild     — requires codespace_name
+      set_machine — requires codespace_name + machine_type (e.g. standardLinux32Gb)
+    """
+    if action == "list":
+        data = await _gh_request_with_fallback("GET", "/user/codespaces", account=account)
+        lines = []
+        for cs in data.get("codespaces", []):
+            lines.append(
+                f"- {cs['name']} | {cs['repository']['full_name']} | "
+                f"{cs['state']} | {cs['machine']['display_name']}"
+            )
+        return "\n".join(lines) if lines else "No codespaces found."
+
+    elif action == "create":
+        if not repo_full_name:
+            return "Error: repo_full_name required for action=create"
+        body: dict = {"ref": branch}
+        if machine_type:
+            body["machine"] = machine_type
+        data = await _gh_request_with_fallback(
+            "POST", f"/repos/{repo_full_name}/codespaces", json_body=body, account=account
+        )
+        return f"Created '{data.get('name')}' (state: {data.get('state')})"
+
+    elif action == "start":
+        if not codespace_name:
+            return "Error: codespace_name required for action=start"
+        try:
+            data = await _gh_request_with_fallback(
+                "POST", f"/user/codespaces/{codespace_name}/start", account=account
+            )
+            state = data.get("state", "starting")
+        except Exception as e:
+            return f"Failed to start '{codespace_name}': {e}"
+        if state in ("Available", "Running"):
+            return f"'{codespace_name}' is already running."
+        for _ in range(15):
+            await asyncio.sleep(2)
+            try:
+                info = await _gh_request_with_fallback(
+                    "GET", f"/user/codespaces/{codespace_name}", account=account
+                )
+                if info.get("state", "") in ("Available", "Running"):
+                    return f"'{codespace_name}' started and is now Available."
+            except Exception:
+                pass
+        return f"Start requested for '{codespace_name}'. Last state: {state}."
+
+    elif action == "stop":
+        if not codespace_name:
+            return "Error: codespace_name required for action=stop"
+        await _gh_request_with_fallback(
+            "POST", f"/user/codespaces/{codespace_name}/stop", account=account
+        )
+        return f"Stop requested for '{codespace_name}'."
+
+    elif action == "rebuild":
+        if not codespace_name:
+            return "Error: codespace_name required for action=rebuild"
+        data = await _gh_request_with_fallback(
+            "POST", f"/user/codespaces/{codespace_name}/rebuild", account=account
+        )
+        return f"Rebuild initiated for '{codespace_name}'. State: {data.get('state', 'queued')}"
+
+    elif action == "set_machine":
+        if not codespace_name or not machine_type:
+            return "Error: codespace_name and machine_type required for action=set_machine"
+        await _gh_request_with_fallback(
+            "PATCH", f"/user/codespaces/{codespace_name}",
+            json_body={"machine": machine_type}, account=account,
+        )
+        return f"Machine updated to '{machine_type}' for '{codespace_name}'."
+
+    else:
+        return f"Unknown action '{action}'. Valid: list, create, start, stop, rebuild, set_machine"
+
+
+
+# ---------------------------------------------------------------------------
+# 4. codespace_files  (was: read_codespace_file + write_codespace_file + list_workspace_files)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def codespace_files(
+    action: str,
+    codespace_name: str = "",
+    file_path: str = "",
+    content: str = "",
+    account: str = "auto",
+) -> str:
+    """
+    Read, write, or list files inside a GitHub Codespace.
+    action: read | write | list
+      read  — requires codespace_name + file_path
+      write — requires codespace_name + file_path + content
+      list  — requires codespace_name; file_path is optional directory (default '.')
+    """
+    if action == "read":
+        if not codespace_name or not file_path:
+            return "Error: codespace_name and file_path required"
+        result = await _cs_exec(codespace_name, f"cat {_q(file_path)}", account=account)
+        return result
+
+    elif action == "write":
+        if not codespace_name or not file_path or content is None:
+            return "Error: codespace_name, file_path and content required"
+        encoded = base64.b64encode(content.encode()).decode()
+        cmd = f"echo {encoded} | base64 -d > {_q(file_path)} && echo 'Written OK'"
+        return await _cs_exec(codespace_name, cmd, account=account)
+
+    elif action == "list":
+        if not codespace_name:
+            return "Error: codespace_name required"
+        path = file_path or "."
+        cmd = f"find {_q(path)} -maxdepth 2 -printf '%M %s\\t%p\\n' 2>/dev/null | head -100"
+        return await _cs_exec(codespace_name, cmd, account=account)
+
+    else:
+        return f"Unknown action '{action}'. Valid: read, write, list"
+
+
+# ---------------------------------------------------------------------------
+# 5. codespace_git  (was: get_git_status + create_git_commit_and_push + list_forwarded_ports)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def codespace_git(
+    action: str,
+    codespace_name: str = "",
+    commit_message: str = "",
+    branch: str = "",
+    repo_path: str = ".",
+    account: str = "auto",
+) -> str:
+    """
+    Git and port operations inside a GitHub Codespace.
+    action: status | commit | ports
+      status — show git status + branch (requires codespace_name)
+      commit — stage all, commit, push (requires codespace_name + commit_message)
+      ports  — list forwarded ports / dev server URLs (requires codespace_name)
+    """
+    if action == "status":
+        if not codespace_name:
+            return "Error: codespace_name required"
+        cmd = f"cd {_q(repo_path)} && git status --short && echo '---' && git branch --show-current"
+        return await _cs_exec(codespace_name, cmd, account=account)
+
+    elif action == "commit":
+        if not codespace_name or not commit_message:
+            return "Error: codespace_name and commit_message required"
+        branch_arg = f"&& git push origin {_q(branch)}" if branch else "&& git push"
+        cmd = (
+            f"cd {_q(repo_path)} && git add -A "
+            f"&& git commit -m {_q(commit_message)} "
+            f"{branch_arg} 2>&1"
+        )
+        return await _cs_exec(codespace_name, cmd, account=account)
+
+    elif action == "ports":
+        if not codespace_name:
+            return "Error: codespace_name required"
+        data = await _gh_request_with_fallback(
+            "GET", f"/user/codespaces/{codespace_name}/ports", account=account
+        )
+        ports = data.get("ports", [])
+        if not ports:
+            return "No forwarded ports."
+        lines = []
+        for p in ports:
+            lines.append(
+                f"- Port {p.get('port_number')}: {p.get('label','?')} | "
+                f"{p.get('visibility','?')} | {p.get('browser_url','no URL')}"
+            )
+        return "\n".join(lines)
+
+    else:
+        return f"Unknown action '{action}'. Valid: status, commit, ports"
+
+
+# ---------------------------------------------------------------------------
+# 6. server_info  (was: server_status + server_network_info + server_docker_status + server_cron_list)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def server_info(
+    section: str = "all",
+    disk_detail: bool = False,
+    disk_path: str = "/",
+    processes: bool = False,
+) -> str:
+    """
+    Get an overview of the home Linux server.
+    section: all | status | network | docker | cron  (default: all)
+      status  — disk + RAM; disk_detail=True adds du breakdown; processes=True adds top procs
+      network — interfaces, open ports, active connections
+      docker  — Docker container list and status
+      cron    — all cron jobs (user + root)
+    """
+    parts = []
+
+    if section in ("all", "status"):
+        cmd = "df -h / 2>/dev/null && echo '---' && free -h | grep Mem"
+        if processes:
+            cmd += " && echo '---' && ps aux --sort=-%cpu | head -10"
+        result = await _ssh_server(cmd)
+        if disk_detail:
+            du = await _ssh_server(
+                f"du -h --max-depth=2 {_q(disk_path)} 2>/dev/null | sort -rh | head -30"
+            )
+            result += f"\n\nDisk breakdown ({disk_path}):\n{du}"
+        parts.append(f"**Status:**\n{result}")
+
+    if section in ("all", "network"):
+        result = await _ssh_server(
+            "ip -br addr && echo '---' && ss -tlnp 2>/dev/null | head -20"
+        )
+        parts.append(f"**Network:**\n{result}")
+
+    if section in ("all", "docker"):
+        result = await _ssh_server(
+            "docker ps -a 2>/dev/null || echo 'Docker not running or not installed'"
+        )
+        parts.append(f"**Docker:**\n{result}")
+
+    if section in ("all", "cron"):
+        result = await _ssh_server(
+            "crontab -l 2>/dev/null || true ; sudo -n crontab -l -u root 2>/dev/null || true"
+        )
+        parts.append(f"**Cron:**\n{result}")
+
+    if not parts:
+        return f"Unknown section '{section}'. Use: all, status, network, docker, cron"
+    return "\n\n".join(parts)
+
+
+
+
+# ---------------------------------------------------------------------------
+# 8. server_files  (was: server_list_files + server_read_file + server_write_file
+#                        + server_move_file + server_delete_file + server_find_duplicates)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def server_files(
+    action: str,
+    path: str = "",
+    destination: str = "",
+    content: str = "",
+    recursive: bool = False,
+    tail: int = 0,
+    head: int = 0,
+) -> str:
+    """
+    Manage files on the home Linux server.
+    action: list | read | write | move | delete | duplicates
+      list       — list files at path; recursive=True walks subdirs (depth 3)
+      read       — read file; tail=N last N lines, head=N first N lines
+      write      — write content to path (overwrites)
+      move       — move/rename path to destination
+      delete     — delete file at path
+      duplicates — scan folder for duplicate files by content hash
+    """
+    if not path:
+        return "Error: path is required for all actions"
+
+    if action == "list":
+        depth = "" if not recursive else " -maxdepth 3"
+        cmd = f"find {_q(path)}{depth} -printf '%M %s\\t%p\\n' 2>/dev/null | head -200"
+        return await _ssh_server(cmd)
+
+    elif action == "read":
+        if tail:
+            return await _ssh_server(f"tail -n {tail} {_q(path)}")
+        elif head:
+            return await _ssh_server(f"head -n {head} {_q(path)}")
+        else:
+            return await _ssh_server(f"cat {_q(path)} 2>/dev/null | head -300")
+
+    elif action == "write":
+        if content is None:
+            return "Error: content is required for action=write"
+        encoded = base64.b64encode(content.encode()).decode()
+        cmd = f"echo {encoded} | base64 -d | sudo -n tee {_q(path)} > /dev/null && echo 'Written OK'"
+        return await _ssh_server(cmd)
+
+    elif action == "move":
+        if not destination:
+            return "Error: destination is required for action=move"
+        return await _ssh_server(f"sudo -n mv {_q(path)} {_q(destination)} && echo 'Moved OK'")
+
+    elif action == "delete":
+        return await _ssh_server(f"sudo -n rm {_q(path)} && echo 'Deleted OK'")
+
+    elif action == "duplicates":
+        cmd = (
+            f"find {_q(path)} -type f -print0 2>/dev/null | "
+            "xargs -0 md5sum 2>/dev/null | sort | uniq -w32 -D"
+        )
+        result = await _ssh_server(cmd)
+        return result or "No duplicates found."
+
+    else:
+        return f"Unknown action '{action}'. Valid: list, read, write, move, delete, duplicates"
+
+
+# ---------------------------------------------------------------------------
+# 9. server_service  (was: server_service_control + server_tail_log)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def server_service(
+    action: str,
+    service: str = "",
+    log_path: str = "/var/log/syslog",
+    lines: int = 50,
+) -> str:
+    """
+    Control systemd services and read logs on the home Linux server.
+    action: start | stop | restart | status | enable | disable | logs
+      start/stop/restart/enable/disable — requires service name
+      status — full systemctl status for service
+      logs   — tail log_path (default /var/log/syslog); lines=N controls count
+    """
+    if action in ("start", "stop", "restart", "enable", "disable"):
+        if not service:
+            return f"Error: service name required for action={action}"
+        return await _ssh_server(
+            f"sudo -n systemctl {action} {_q(service)} && echo '{action} OK'"
+        )
+    elif action == "status":
+        if not service:
+            return "Error: service name required for action=status"
+        return await _ssh_server(
+            f"sudo -n systemctl status {_q(service)} --no-pager -l 2>&1"
+        )
+    elif action == "logs":
+        return await _ssh_server(f"sudo -n tail -n {lines} {_q(log_path)} 2>&1")
+    else:
+        return f"Unknown action '{action}'. Valid: start, stop, restart, status, enable, disable, logs"
+
+
+# ---------------------------------------------------------------------------
+# 10. pc_info  (was: pc_list + pc_list_configured + pc_organiser_status)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def pc_info(
+    action: str = "list",
+    pc: str = "default",
+    include_offline: bool = False,
+) -> str:
+    """
+    Get info about connected Windows PCs via the organiser-agent.
+    action: list | configured | status
+      list       — auto-discovered online PCs (include_offline=True to see offline too)
+      configured — all PCs in the registry with live reachability status
+      status     — check organiser-agent health on a specific pc (default: 'default')
+    """
+    if action == "list":
+        pcs = await _pc_list(include_offline=include_offline)
+        if not pcs:
+            return "No PCs discovered."
+        lines = []
+        for p in pcs:
+            status = "🟢 online" if p.get("online") else "🔴 offline"
+            lines.append(f"- {p.get('name','?')} | {status} | {p.get('ip','?')}")
+        return "\n".join(lines)
+
+    elif action == "configured":
+        pcs = await _pc_list_configured()
+        if not pcs:
+            return "No PCs configured."
+        lines = []
+        for p in pcs:
+            reachable = "✅" if p.get("reachable") else "❌"
+            lines.append(
+                f"- {p.get('name','?')} {reachable} | "
+                f"v{p.get('version','?')} | {p.get('platform','?')} | {p.get('ip','?')}"
+            )
+        return "\n".join(lines)
+
+    elif action == "status":
+        result = await _pc_organiser_status(pc=pc)
+        return result
+
+    else:
+        return f"Unknown action '{action}'. Valid: list, configured, status"
+
+
+# ---------------------------------------------------------------------------
+# 11. pc_files  (was: pc_list_files + pc_move_file + pc_delete_file
+#                     + pc_read_file_preview + pc_disk_usage + pc_find_duplicates)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def pc_files(
+    action: str,
+    path: str = "",
+    destination: str = "",
+    pc: str = "default",
+    recursive: bool = False,
+    max_bytes: int = 4096,
+) -> str:
+    """
+    Manage files on a Windows PC via organiser-agent.
+    action: list | read | move | delete | disk | duplicates
+      list       — list files/folders at path (recursive=True for subdirs)
+      read       — read first max_bytes of a text file at path
+      move       — move/rename path to destination
+      delete     — send file to Recycle Bin (safe)
+      disk       — disk usage breakdown for folder at path, sorted largest-first
+      duplicates — find duplicate files by content hash under path
+    """
+    if not path and action not in ("disk",):
+        return "Error: path is required"
+
+    if action == "list":
+        return await _pc_list_files(folder=path, pc=pc, recursive=recursive)
+    elif action == "read":
+        return await _pc_read_file_preview(path=path, pc=pc, max_bytes=max_bytes)
+    elif action == "move":
+        if not destination:
+            return "Error: destination required for action=move"
+        return await _pc_move_file(source=path, destination=destination, pc=pc)
+    elif action == "delete":
+        return await _pc_delete_file(path=path, pc=pc, permanent=False)
+    elif action == "disk":
+        folder = path or "C:\\"
+        return await _pc_disk_usage(folder=folder, pc=pc)
+    elif action == "duplicates":
+        return await _pc_find_duplicates(folder=path, pc=pc)
+    else:
+        return f"Unknown action '{action}'. Valid: list, read, move, delete, disk, duplicates"
+
+
+
+# ---------------------------------------------------------------------------
+# 13. pc_screenshot  (was: pc__screenshot — renamed, kept separate for clarity)
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def pc_screenshot(
+    pc: str = "default",
+    save_path: str = "",
+) -> str:
+    """
+    Capture a screenshot of a PC's screen.
+    Returns base64-encoded image data for viewing/analysis.
+    save_path — optional path on the PC to also save the file.
+    """
+    return await _pc__screenshot(pc=pc, save_path=save_path)
 
 
 @mcp.tool()
