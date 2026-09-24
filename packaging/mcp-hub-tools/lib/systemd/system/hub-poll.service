@@ -1,0 +1,11 @@
+[Unit]
+Description=MCP Hub Monitor - PC poll cycle
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/mcp-hub-tools/hub-monitor.py poll
+User=root
+EnvironmentFile=-/etc/mcp-hub-tools/config.env
+StandardOutput=journal
+StandardError=journal
