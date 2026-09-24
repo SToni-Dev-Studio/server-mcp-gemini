@@ -36,64 +36,75 @@ jobs:
           chmod 755 packaging/mcp-hub-tools/DEBIAN/prerm
           chmod 755 packaging/mcp-hub-tools/DEBIAN/postrm
 
+      - name: Install build deps
+        run: sudo apt-get install -y dpkg-dev
+
       - name: Build .deb
-        run: |
-          sudo apt-get install -y dpkg-dev
-          bash packaging/build-deb.sh ${{ steps.version.outputs.VERSION }}
+        run: bash packaging/build-deb.sh ${{ steps.version.outputs.VERSION }}
 
       - name: Find built .deb
         id: deb
         run: |
-          DEB=$(find packaging -name "*.deb" | head -1)
+          DEB=$(find packaging -maxdepth 1 -name "*.deb" | head -1)
           echo "DEB_PATH=$DEB" >> $GITHUB_OUTPUT
           echo "DEB_NAME=$(basename $DEB)" >> $GITHUB_OUTPUT
+          echo "SHA256=$(cat ${DEB}.sha256 2>/dev/null || sha256sum $DEB | cut -d' ' -f1)" >> $GITHUB_OUTPUT
+          echo "Found: $DEB"
 
       - name: Generate install script
         run: |
           VERSION=${{ steps.version.outputs.VERSION }}
           DEB_NAME=${{ steps.deb.outputs.DEB_NAME }}
+          SHA256=${{ steps.deb.outputs.SHA256 }}
+          BASE_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
+
           cat > install.sh << INSTALLEOF
-          #!/bin/bash
-          set -e
-          echo "Installing mcp-hub-tools v${VERSION}..."
-          
-          # Download .deb
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/v${VERSION}/${DEB_NAME}" -o /tmp/${DEB_NAME}
-          
-          # Install
-          sudo dpkg -i /tmp/${DEB_NAME}
-          sudo apt-get install -f -y
-          
-          # Prompt for config
-          echo ""
-          echo "Configuration required:"
-          read -p "MCP Server URL (e.g. https://server-mcp-gemini.onrender.com): " MCP_URL
-          read -p "MCP Password: " -s MCP_PASSWORD
-          echo ""
-          read -p "Tailscale SSH hostname of Linux server: " SERVER_HOST
-          read -p "Linux server SSH user (default: sepisotoni): " SERVER_USER
-          SERVER_USER=\${SERVER_USER:-sepisotoni}
-          
-          # Write config
-          sudo mkdir -p /etc/mcp-hub-tools
-          sudo tee /etc/mcp-hub-tools/config.env > /dev/null << CONFEOF
-          MCP_SERVER_URL=\${MCP_URL}
-          MCP_PASSWORD=\${MCP_PASSWORD}
-          SERVER_HOST=\${SERVER_HOST}
-          SERVER_USER=\${SERVER_USER}
-          CONFEOF
-          sudo chmod 600 /etc/mcp-hub-tools/config.env
-          
-          # Enable and start services
-          sudo systemctl daemon-reload
-          sudo systemctl enable mcp-hub-tools-autoupdate.timer
-          sudo systemctl start mcp-hub-tools-autoupdate.timer
-          
-          echo ""
-          echo "✅ mcp-hub-tools v${VERSION} installed successfully!"
-          echo "   Run: hub-cli --help"
-          echo "   Run: hub-diagnostics --help"
-          INSTALLEOF
+#!/bin/bash
+set -e
+echo "Installing mcp-hub-tools v${VERSION}..."
+
+# Download .deb
+curl -fsSL "${BASE_URL}/${DEB_NAME}" -o /tmp/${DEB_NAME}
+
+# Verify checksum
+echo "${SHA256}  /tmp/${DEB_NAME}" | sha256sum -c -
+
+# Install
+sudo dpkg -i /tmp/${DEB_NAME}
+sudo apt-get install -f -y
+
+# Prompt for config
+echo ""
+echo "Configuration required:"
+read -p "MCP Server URL (e.g. https://server-mcp-gemini.onrender.com): " MCP_URL
+read -p "MCP Password: " -s MCP_PASSWORD
+echo ""
+read -p "Linux server hostname or Tailscale IP: " SERVER_HOST
+read -p "Linux server SSH user (default: sepisotoni): " SERVER_USER
+SERVER_USER=\${SERVER_USER:-sepisotoni}
+
+# Write config
+sudo mkdir -p /etc/mcp-hub-tools
+sudo tee /etc/mcp-hub-tools/config.env > /dev/null << CONFEOF
+MCP_SERVER_URL=\${MCP_URL}
+MCP_PASSWORD=\${MCP_PASSWORD}
+SERVER_HOST=\${SERVER_HOST}
+SERVER_USER=\${SERVER_USER}
+CONFEOF
+sudo chmod 600 /etc/mcp-hub-tools/config.env
+
+# Enable services
+sudo systemctl daemon-reload
+sudo systemctl enable --now hub-monitor.service
+sudo systemctl enable --now hub-poll.timer
+sudo systemctl enable --now mcp-hub-tools-autoupdate.timer
+
+echo ""
+echo "mcp-hub-tools v${VERSION} installed!"
+echo "  hub-cli --help"
+echo "  hub-diagnostics --help"
+echo "  hub-monitor status"
+INSTALLEOF
           chmod +x install.sh
 
       - name: Create GitHub Release
@@ -103,18 +114,20 @@ jobs:
           name: mcp-hub-tools v${{ steps.version.outputs.VERSION }}
           body: |
             ## mcp-hub-tools v${{ steps.version.outputs.VERSION }}
-            
+
             ### One-line install
             ```bash
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/install.sh | bash
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/install.sh | sudo bash
             ```
-            
-            ### Manual install
-            Download `${{ steps.deb.outputs.DEB_NAME }}` below and run:
-            ```bash
-            sudo dpkg -i ${{ steps.deb.outputs.DEB_NAME }}
-            sudo apt-get install -f -y
-            ```
+
+            ### What's included
+            - `hub-cli` — manage PC tunnel config and Render env vars
+            - `hub-diagnostics` — local health checks and connectivity tests
+            - `hub-monitor` — PC self-registration listener + 5-min poll daemon
+            - systemd units: `hub-monitor.service`, `hub-poll.timer`, `mcp-hub-tools-autoupdate.timer`
+
+            ### SHA256
+            `${{ steps.deb.outputs.SHA256 }}`
           files: |
             ${{ steps.deb.outputs.DEB_PATH }}
             install.sh
