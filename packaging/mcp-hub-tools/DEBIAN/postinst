@@ -3,34 +3,64 @@ set -e
 
 case "$1" in
   configure)
+    # ── Directories ──────────────────────────────────────────────────────────
     mkdir -p /etc/pc-tunnel/known_hosts.d
     chmod 755 /etc/pc-tunnel
     chmod 755 /etc/pc-tunnel/known_hosts.d
 
     mkdir -p /etc/hub-cli
-    chmod 700 /etc/hub-cli  # will hold the 0600 credentials file hub-cli.py writes
+    chmod 700 /etc/hub-cli
 
+    mkdir -p /etc/mcp-hub-tools
+    chmod 700 /etc/mcp-hub-tools
+
+    mkdir -p /var/lib/hub-monitor
+    chmod 755 /var/lib/hub-monitor
+
+    # ── Make scripts executable ───────────────────────────────────────────────
+    chmod +x /usr/lib/mcp-hub-tools/hub-cli.py       || true
+    chmod +x /usr/lib/mcp-hub-tools/hub-diagnostics.py || true
+    chmod +x /usr/lib/mcp-hub-tools/hub-monitor.py   || true
+    chmod +x /usr/lib/mcp-hub-tools/autoupdate.sh    || true
+
+    # ── Symlinks into PATH ────────────────────────────────────────────────────
+    ln -sf /usr/lib/mcp-hub-tools/hub-monitor.py /usr/local/bin/hub-monitor || true
+
+    # ── Systemd ───────────────────────────────────────────────────────────────
     if [ -x /usr/bin/systemctl ] && [ -d /run/systemd/system ]; then
       systemctl daemon-reload || true
+
+      # Enable + start hub-monitor listener
+      systemctl enable hub-monitor.service  || true
+      systemctl start  hub-monitor.service  || true
+
+      # Enable + start 5-minute poll timer
+      systemctl enable hub-poll.timer       || true
+      systemctl start  hub-poll.timer       || true
+
+      # Auto-update timer (disabled by default — user opts in)
+      systemctl enable mcp-hub-tools-autoupdate.timer || true
     fi
 
     cat <<'EOF'
 
 mcp-hub-tools installed:
-  hub-cli          -- manage PC tunnel config (see: hub-cli --help)
-  hub-diagnostics  -- local health checks (see: hub-diagnostics --help)
-  pc-tunnel@.service -- systemd template (see: hub-cli pc add --help)
+  hub-cli          -- manage PC tunnel config        (hub-cli --help)
+  hub-diagnostics  -- local health checks            (hub-diagnostics --help)
+  hub-monitor      -- PC registration + poll daemon  (hub-monitor --help)
 
-Next steps for a new PC:
-  1. sudo hub-cli pc add <name> <pc-ip>
-  2. sudo hub-cli pc pin <name>
-  3. Add <name> to the PCS env var on the Render service (or:
-     hub-cli config set-render-credentials --api-key ... --service-id ...
-     then hub-cli render set PCS '{"<name>": {"port": 7842, "secret": "..."}}')
+Services started:
+  hub-monitor.service  -- listens on :7700 for PC self-registration
+  hub-poll.timer       -- polls all registered PCs every 5 minutes
 
-Auto-update is installed but disabled by default. To enable it:
+Next steps:
+  1. Edit /etc/mcp-hub-tools/config.env with MCP_SERVER_URL + MCP_PASSWORD
+  2. On each Windows PC install organiser-agent and set HUB_MONITOR_URL
+  3. PCs will auto-register; check with: hub-monitor status
+  4. To add a manual PC tunnel: sudo hub-cli pc add <n> <ip>
+
+Auto-update is installed but disabled by default:
   sudo systemctl enable --now mcp-hub-tools-autoupdate.timer
-See /usr/share/doc/mcp-hub-tools/README for what it does before enabling.
 
 EOF
     ;;
