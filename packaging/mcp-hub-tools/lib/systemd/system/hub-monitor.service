@@ -1,0 +1,17 @@
+[Unit]
+Description=MCP Hub Monitor - PC registration listener
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/mcp-hub-tools/hub-monitor.py serve
+Restart=on-failure
+RestartSec=10
+User=root
+EnvironmentFile=-/etc/mcp-hub-tools/config.env
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
