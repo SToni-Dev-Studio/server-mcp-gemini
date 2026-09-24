@@ -1,20 +1,15 @@
 Package: mcp-hub-tools
-Version: __VERSION__
-Section: admin
+Version: 0.3.0
+Section: utils
 Priority: optional
 Architecture: all
-Depends: python3 (>= 3.10), openssh-client, systemd
-Recommends: tailscale
-Maintainer: server-mcp-gemini project <noreply@example.invalid>
-Homepage: https://github.com/mienkek13-netizen/server-mcp-gemini
-Description: Hub-side tools for the server-mcp-gemini Windows-PC tunnel fleet
- Installs hub-diagnostics.py (local health checks for pc-tunnel@.service
- instances, Tailscale, and disk space) and hub-cli.py (manage PC tunnel
- config, pin SSH host keys, and read/write the Render-hosted service's
- env vars) as /usr/bin/hub-diagnostics and /usr/bin/hub-cli, plus the
- pc-tunnel@.service systemd template these tools manage.
+Depends: python3 (>= 3.10), openssh-client, curl
+Maintainer: sepisotoni <ndili.mqeni@gmail.com>
+Description: MCP Hub Tools - Linux server-side agent for Claude MCP
+ Provides hub-cli, hub-diagnostics, and hub-monitor for managing
+ PC tunnel connections and auto-discovery from a home Linux server.
  .
- Also installs an opt-in auto-update timer (disabled by default) that
- checks GitHub Releases for a newer version of this package and
- installs it automatically -- see /usr/share/doc/mcp-hub-tools/README
- for how to enable it.
+ hub-cli: manage SSH tunnel configs and Render env vars
+ hub-diagnostics: local health checks and connectivity tests
+ hub-monitor: HTTP listener for PC self-registration + 5-min poll
+ pc-tunnel@.service: systemd template for per-PC SSH tunnels
