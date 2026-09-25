@@ -1,13 +1,17 @@
 [Unit]
-Description=MCP Hub Auto-Discovery Listener & Poller (Proposal v2)
-After=network.target
+Description=MCP Hub Monitor - PC registration listener
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+ExecStart=/usr/lib/mcp-hub-tools/hub-monitor.py serve
+Restart=on-failure
+RestartSec=10
 User=root
-ExecStart=/usr/bin/python3 /usr/lib/mcp-hub-tools/hub-monitor.py --port 7840
-Restart=always
-RestartSec=5
+EnvironmentFile=-/etc/mcp-hub-tools/config.env
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target
