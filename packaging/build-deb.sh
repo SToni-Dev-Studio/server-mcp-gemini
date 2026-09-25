@@ -23,7 +23,7 @@ if [ -f "$REPO_ROOT/scripts/hub_pc_registry.py" ]; then
     chmod 755 "$BUILD_DIR/usr/lib/mcp-hub-tools/hub_pc_registry.py"
 fi
 cp "$REPO_ROOT/pc-tunnel@.service" "$BUILD_DIR/lib/systemd/system/pc-tunnel@.service"
-cp "$REPO_ROOT/mcp-hub-monitor.service" "$BUILD_DIR/lib/systemd/system/mcp-hub-monitor.service"
+cp "$REPO_ROOT/mcp-hub-monitor.service" "$BUILD_DIR/lib/systemd/system/mcp-hub-monitor.service" 2>/dev/null || true
 
 chmod 755 "$BUILD_DIR/usr/lib/mcp-hub-tools/hub-cli.py"
 chmod 755 "$BUILD_DIR/usr/lib/mcp-hub-tools/hub-diagnostics.py"
