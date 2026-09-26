@@ -20,15 +20,15 @@ Auth:
 
 PC organiser-agent routing:
     Render never talks to a PC directly. Every pc_* tool call goes
-    Render -> tailscale ssh -> Linux server -> loopback tunnel -> PC.
+    Render -> ordinary SSH -> Linux server -> loopback tunnel -> PC.
     See the "PC File Organiser Tools" section below for the full
     diagram. Multiple PCs are supported via the `PCS` env var (JSON
     registry) and a `pc` parameter on every pc_*/transfer__*_pc tool.
 
 
 Server Management:
-    Set SERVER_HOST and SERVER_USER; auth via SSH_PRIVATE_KEY (raw key
-    text) or SERVER_SSH_KEY (path), routed over `tailscale ssh`.
+    Set SERVER_HOST, SERVER_USER, and optionally SERVER_SSH_PORT; authenticate
+    with SSH_PRIVATE_KEY (raw key text) or SERVER_SSH_KEY (path).
 
 Admin dashboard (configure everything from a browser):
     Visit /admin on this service's URL. Requires RENDER_API_KEY (and
@@ -70,7 +70,8 @@ RENDER_API = "https://api.render.com/v1"
 
 SERVER_HOST = os.environ.get("SERVER_HOST", "192.168.101.105")
 SERVER_USER = os.environ.get("SERVER_USER", "sepisotoni")
-SERVER_SSH_KEY = os.environ.get("SERVER_SSH_KEY", "~/.ssh/id_rsa")
+SERVER_SSH_PORT = int(os.environ.get("SERVER_SSH_PORT") or "22")
+SERVER_SSH_KEY = os.path.expanduser(os.environ.get("SERVER_SSH_KEY", "~/.ssh/id_rsa"))
 
 # This service's own Render identity — used by the admin dashboard to manage
 # itself by default. Override RENDER_SERVICE_ID if you rename/fork the service.
@@ -466,11 +467,7 @@ async def _gh_request_with_fallback(
 
 async def _ssh_server(command: str, timeout: int = 60) -> str:
     """
-    Run a command on the home Linux server.
-    Strategy:
-      1. Try regular SSH first (fast, LAN-local, handles sudo correctly)
-      2. Fall back to Tailscale SSH if regular SSH fails to connect
-    sudo commands work because the sudoers nopasswd rules are configured on the server.
+    Run a command on the home Linux server over key-authenticated SSH.
     """
 
     async def _run(cmd_list: list, t: int) -> tuple[int, str]:
@@ -502,7 +499,6 @@ async def _ssh_server(command: str, timeout: int = 60) -> str:
         else []
     )
 
-    # PRIMARY: Regular SSH — faster on LAN, sudo nopasswd works reliably
     ssh_cmd = [
         "ssh",
         "-o", "StrictHostKeyChecking=no",
@@ -511,23 +507,16 @@ async def _ssh_server(command: str, timeout: int = 60) -> str:
         "-o", f"ConnectTimeout=8",
         "-o", "ServerAliveInterval=5",
         "-o", "ServerAliveCountMax=2",
+        "-p", str(SERVER_SSH_PORT),
     ] + key_args + [f"{SERVER_USER}@{SERVER_HOST}", command]
 
     rc, output = await _run(ssh_cmd, timeout)
-    if rc >= 0:  # 0 = success, >0 = command ran but errored — both mean SSH worked
+    target = f"{SERVER_USER}@{SERVER_HOST}:{SERVER_SSH_PORT}"
+    if rc == 0:
         return output or f"(exited {rc}, no output)"
-    if "timed out" in output:
-        return f"Command timed out after {timeout}s"
-
-    # FALLBACK: Tailscale SSH — works across networks when LAN SSH fails
-    ts_cmd = ["tailscale", "ssh", f"{SERVER_USER}@{SERVER_HOST}", command]
-    rc, output = await _run(ts_cmd, timeout)
-    if rc >= 0:
-        return output or f"(exited {rc}, no output)"
-    if "timed out" in output:
-        return f"Command timed out after {timeout}s"
-
-    return f"SSH execution failed (both LAN and Tailscale): {output}"
+    if rc == -1:
+        return f"SSH to {target} failed: {output}"
+    return f"SSH to {target} exited with status {rc}: {output or 'no output'}"
 
 
 # ---------------------------------------------------------------------------
@@ -677,8 +666,8 @@ async def server_run_command(command: str) -> str:
 # to a PC directly:
 #
 #   Render (this process)
-#       │  tailscale ssh  (same channel _ssh_server() uses for every
-#       │                  other server_* tool — one exec call)
+#       │  ordinary SSH (same channel _ssh_server() uses for every
+#       │                other server_* tool — one exec call)
 #       ▼
 #   stoni-room-serve (Linux)
 #       │  curl http://127.0.0.1:<pc's port>/...  (loopback only —
@@ -687,10 +676,8 @@ async def server_run_command(command: str) -> str:
 #       ▼
 #   organiser-agent.exe on the target PC
 #
-# Render never opens a raw TCP connection to any PC, and never even
-# opens one to the server's public/Tailscale IP for this traffic — it's
-# folded into the same authenticated `tailscale ssh` exec used
-# everywhere else. Every server-side tunnel is loopback-only.
+# Render never opens a raw TCP connection to any PC. PC requests are
+# proxied through the Linux server's loopback-only tunnels over SSH.
 #
 # Multi-PC: configure the PCS env var (see "PC Registry" above). Every
 # tool below takes `pc: str = "default"` to pick which machine it talks to.
@@ -708,7 +695,7 @@ async def _organiser_ssh_request(
     """
     Executes one HTTP request against a PC's organiser-agent by having the
     Linux server curl its own loopback tunnel for that PC, via the
-    existing tailscale-ssh exec channel. Returns raw response text
+    existing SSH exec channel. Returns raw response text
     (expected to be JSON).
 
     The whole request is shipped as a base64-encoded Python source blob

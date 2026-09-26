@@ -43,9 +43,14 @@ env vars detected = local dev mode). Point an MCP client at
 `http://localhost:8000/mcp`.
 
 For an actual deployment (Render) reachable by Claude, plus the Windows
-PC agent and Linux tunnel setup, follow **`BUILD_AND_SETUP.md`** from
+PC agent and Linux server setup, follow **`BUILD_AND_SETUP.md`** from
 the top — there's no shortcut version, since the PC/server pieces each
 need their own machine-side setup.
+
+The Render service reaches the Linux server using ordinary key-based SSH.
+Configure `SERVER_HOST`, `SERVER_USER`, `SERVER_SSH_PORT` (default `22`),
+and `SSH_PRIVATE_KEY`; the configured host and TCP port must be reachable
+from the deployment.
 
 ## Auth model
 

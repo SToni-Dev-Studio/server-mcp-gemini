@@ -8,7 +8,7 @@ fleet. Installs:
                                 keys, read/write the Render-hosted
                                 service's env vars
   /usr/bin/hub-diagnostics  -- local health checks (tunnel services,
-                                port reachability, Tailscale, disk space)
+                                port reachability, SSH, disk space)
   /lib/systemd/system/pc-tunnel@.service
                              -- the systemd template each configured PC
                                 gets an instance of
@@ -28,33 +28,12 @@ Check everything's healthy:
 See `hub-cli --help` / `hub-diagnostics --help` for the full command
 list.
 
-Tailscale SSH ACL gotcha
--------------------------
-If the hub reaches your home server over Tailscale SSH (rather than a
-plain key-based SSH the hub already trusts), Tailscale's DEFAULT ACL
-action for SSH is "check", which requires interactive approval in a
-browser the first time a connection is made. In an automated context
-(this project's Render-hosted MCP server calling in on a schedule, or
-this package's own autoupdate timer, or anything else non-interactive)
-that "check" just hangs for about 60 seconds and then fails -- there's
-no browser to approve it in.
-
-Fix: in your Tailscale ACL policy, change the relevant ssh rule's
-action from "check" to "accept" for this use case:
-
-    "ssh": [
-      {
-        "action": "accept",
-        "src": ["..."],
-        "dst": ["..."],
-        "users": ["..."]
-      }
-    ]
-
-This was hit for real during this project's first live end-to-end
-verification (MCP client -> Render -> Tailscale -> home server -> real
-command execution) -- worth doing this BEFORE your first automated run,
-not after watching it hang once.
+SSH connectivity
+----------------
+The Render service uses ordinary key-based SSH to reach the Linux hub.
+Configure its hostname/IP, TCP port, user, and private key in the Render
+environment. The SSH port must be reachable from Render through the
+server's firewall and any required router port forwarding.
 
 Auto-update
 ------------

@@ -4,11 +4,10 @@ hub-diagnostics.py — local health check for the Linux hub server.
 
 Complements (does NOT duplicate) server.py's `run_diagnostics` MCP tool:
 that one checks reachability FROM Render's side, over the whole chain
-(Render -> tailscale ssh -> hub -> tunnel -> PC). It can tell you "PC
-'desktop' unreachable" but not WHY -- is the systemd unit down? Is the
-port not listening? Is Tailscale itself down? Those questions can only
-be answered by running something ON the hub, which is what this script
-is for.
+(Render -> SSH -> hub -> tunnel -> PC). It can tell you "PC 'desktop'
+unreachable" but not WHY -- is the systemd unit down? Is the port not
+listening? Those questions can only be answered by running something ON
+the hub, which is what this script is for.
 
 Usage:
     python3 hub-diagnostics.py            # human-readable table
@@ -199,26 +198,6 @@ def check_port_listening(name: str, port: str) -> dict:
         sock.close()
 
 
-def check_tailscale(run=_run) -> dict:
-    if not shutil.which("tailscale"):
-        return check_result("Tailscale", NOT_CONFIGURED, "tailscale not installed")
-    r = run(["tailscale", "status", "--json"], timeout=10)
-    if r.returncode != 0:
-        return check_result(
-            "Tailscale", FAIL, (r.stderr or "tailscale status failed").strip()[:200]
-        )
-    try:
-        data = json.loads(r.stdout)
-    except json.JSONDecodeError:
-        return check_result(
-            "Tailscale", FAIL, "tailscale status returned non-JSON output"
-        )
-    backend_state = data.get("BackendState", "?")
-    if backend_state == "Running":
-        return check_result("Tailscale", PASS, "BackendState: Running")
-    return check_result("Tailscale", FAIL, f"BackendState: {backend_state}")
-
-
 def check_ssh_reachable(
     name: str,
     pc_ip: str,
@@ -309,7 +288,6 @@ def run_all(
     checks = [
         check_systemd_available(run),
         check_pc_tunnel_config_dir(conf_dir),
-        check_tailscale(run),
         check_disk_space(),
     ]
 

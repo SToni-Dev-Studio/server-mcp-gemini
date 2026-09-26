@@ -9,10 +9,10 @@ Two kinds of coverage here, and they're not the same thing:
    stubbing at all.
 
 2. Decision-logic tests with a stubbed `run` callable: check_systemd_available,
-   check_tunnel_service, check_tailscale, check_ssh_reachable take `run`
-   as a parameter specifically so a test can hand them a fake
-   subprocess.CompletedProcess without needing a real systemd bus, real
-   Tailscale install, or a real reachable SSH host -- none of which exist
+   check_tunnel_service, check_ssh_reachable take `run` as a parameter
+   specifically so a test can hand them a fake subprocess.CompletedProcess
+   without needing a real systemd bus or a reachable SSH host -- neither
+   of which exists
    in a CI runner or this sandbox. This tests "does the script correctly
    classify PASS vs FAIL vs SKIPPED given a known systemctl/ssh output",
    which is the actual bug-prone part (see hub-diagnostics.py's comment
@@ -57,7 +57,7 @@ def fake_run(returncode=0, stdout="", stderr="", captured_cmds=None):
 def _assume_tools_installed(monkeypatch):
     """Most decision-logic tests below are about how this script
     interprets a command's OUTPUT (active/inactive/offline/JSON), not
-    about whether systemctl/ssh/tailscale happen to be installed on
+    about whether systemctl/ssh happen to be installed on
     whatever machine runs the test suite -- that would make the suite
     flaky depending on the CI image. Default shutil.which to "yes,
     installed" for every tool so those tests are deterministic; the
@@ -66,7 +66,7 @@ def _assume_tools_installed(monkeypatch):
     real_which = hd.shutil.which
 
     def _which(name):
-        if name in ("systemctl", "ssh", "tailscale"):
+        if name in ("systemctl", "ssh"):
             return f"/usr/bin/{name}"
         return real_which(name)
 
@@ -217,36 +217,6 @@ def test_tunnel_service_skipped_on_unparseable_output():
     assert result["status"] == hd.SKIPPED
 
 
-def test_tailscale_pass_when_backend_running(monkeypatch):
-    monkeypatch.setattr(hd.shutil, "which", lambda name: "/usr/bin/tailscale")
-    result = hd.check_tailscale(
-        run=fake_run(returncode=0, stdout='{"BackendState": "Running"}')
-    )
-    assert result["status"] == hd.PASS
-
-
-def test_tailscale_fail_when_backend_stopped(monkeypatch):
-    monkeypatch.setattr(hd.shutil, "which", lambda name: "/usr/bin/tailscale")
-    result = hd.check_tailscale(
-        run=fake_run(returncode=0, stdout='{"BackendState": "Stopped"}')
-    )
-    assert result["status"] == hd.FAIL
-
-
-def test_tailscale_fail_on_bad_json(monkeypatch):
-    monkeypatch.setattr(hd.shutil, "which", lambda name: "/usr/bin/tailscale")
-    result = hd.check_tailscale(run=fake_run(returncode=0, stdout="not json"))
-    assert result["status"] == hd.FAIL
-
-
-def test_tailscale_not_configured_when_not_installed(monkeypatch):
-    monkeypatch.setattr(hd.shutil, "which", lambda name: None)
-    result = hd.check_tailscale(
-        run=fake_run(returncode=0, stdout='{"BackendState": "Running"}')
-    )
-    assert result["status"] == hd.NOT_CONFIGURED
-
-
 def test_ssh_reachable_pass():
     result = hd.check_ssh_reachable(
         "desktop", "192.168.1.50", "alice", run=fake_run(returncode=0, stdout="")
@@ -392,15 +362,8 @@ def test_main_exits_nonzero_on_failure(tmp_path, monkeypatch, capsys):
 
 
 def test_main_exits_zero_when_nothing_configured(tmp_path, monkeypatch):
-    # Opt out of the autouse "assume tools installed" fixture here: this
-    # test is specifically about the genuinely-nothing-configured,
-    # nothing-installed path (tailscale really isn't on this sandbox),
-    # so faking tool presence while still calling the REAL subprocess
-    # runner (main() doesn't take an injected `run=`) would make
-    # check_tailscale try to actually exec a nonexistent binary and
-    # report FAIL for the wrong reason -- caught by running this exact
-    # test and seeing it fail with "No such file or directory: 'tailscale'"
-    # instead of the NOT_CONFIGURED this test is meant to verify.
+    # Opt out of the autouse "assume tools installed" fixture here to test
+    # the genuinely unconfigured path with the real subprocess runner.
     monkeypatch.setattr(hd.shutil, "which", lambda name: None)
     monkeypatch.setattr(
         sys,

@@ -79,7 +79,7 @@ echo "Configuration required:"
 read -p "MCP Server URL (e.g. https://server-mcp-gemini.onrender.com): " MCP_URL
 read -p "MCP Password: " -s MCP_PASSWORD
 echo ""
-read -p "Linux server hostname or Tailscale IP: " SERVER_HOST
+read -p "Linux server hostname or IP: " SERVER_HOST
 read -p "Linux server SSH user (default: sepisotoni): " SERVER_USER
 SERVER_USER=\${SERVER_USER:-sepisotoni}
 

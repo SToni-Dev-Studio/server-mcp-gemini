@@ -12,7 +12,7 @@ one broad "do anything" tool:
 
 1. GitHub Codespaces lifecycle (create/stop/rebuild/resize, exec a
    command inside one, read/write files, git status/commit/push).
-2. A Linux home server, reached over `tailscale ssh` (services, files,
+2. A Linux home server, reached over ordinary key-based SSH (services, files,
    logs, cron, docker, disk, network, a Sonarr/qBittorrent download
    pipeline).
 3. One or more Windows PCs, each running a companion agent
@@ -37,7 +37,7 @@ Render — server.py (Python/FastMCP)
       │
       ├─ GitHub API ──────────────► GitHub Codespaces (gh CLI over SSH)
       │
-      ├─ tailscale ssh ───────────► Linux home server
+      ├─ ordinary SSH ────────────► Linux home server
       │   (ONE authenticated channel, reused for every server_* tool
       │    AND every pc_* tool — see "PC routing" below)
       │        │
@@ -69,13 +69,13 @@ the next one on a 401/403.
 ## PC routing, in detail
 
 Render never opens a connection to a PC, or even to the Linux server's
-public/Tailscale IP for PC traffic. Every `pc_*` call (and `file_transfer`
-whenever a `pc:` address is involved) folds into the *same* `tailscale
-ssh` exec channel used for every `server_*` tool:
+public IP for PC traffic. Every `pc_*` call (and `file_transfer` whenever
+a `pc:` address is involved) uses the same ordinary SSH exec channel used
+for every `server_*` tool:
 
 ```
 Render (server.py: _organiser_ssh_request)
-    │ tailscale ssh <user>@<server>  "<base64 python blob> | python3 -"
+    │ ssh <user>@<server>  "<base64 python blob> | python3 -"
     ▼
 Linux server
     │ that inline python script does: urllib → http://127.0.0.1:<PC's port>/...

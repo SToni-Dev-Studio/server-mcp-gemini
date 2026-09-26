@@ -64,9 +64,9 @@ services:
         sync: false
       - key: SERVER_USER
         sync: false
+      - key: SERVER_SSH_PORT
+        value: "22"
       - key: SSH_PRIVATE_KEY
-        sync: false
-      - key: TAILSCALE_AUTH_KEY
         sync: false
 
       # --- Windows PC(s) via organiser-agent (pc_* tools) ---

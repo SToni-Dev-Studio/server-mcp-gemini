@@ -18,6 +18,7 @@ const FLY_API = "https://api.fly.io/graphql";
 
 const SERVER_HOST = process.env.SERVER_HOST || "192.168.101.105";
 const SERVER_USER = process.env.SERVER_USER || "sepisotoni";
+const SERVER_SSH_PORT = process.env.SERVER_SSH_PORT || "22";
 let SERVER_SSH_KEY = process.env.SERVER_SSH_KEY || "~/.ssh/id_rsa";
 
 const RENDER_API_KEY = (process.env.RENDER_API_KEY || "").trim();
@@ -257,6 +258,7 @@ async function sshServer(command: string, timeoutSec: number = 60): Promise<stri
     "-o", "UserKnownHostsFile=/dev/null",
     "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10",
+    "-p", SERVER_SSH_PORT,
     ...keyArgs,
     `${SERVER_USER}@${SERVER_HOST}`,
     command,
@@ -268,16 +270,9 @@ async function sshServer(command: string, timeoutSec: number = 60): Promise<stri
     if (res.code === 0) {
       return out || `(exited ${res.code}, no output)`;
     }
-  } catch {}
-
-  // Fallback to tailscale ssh
-  try {
-    const tsArgs = ["ssh", `${SERVER_USER}@${SERVER_HOST}`, command];
-    const res = await runLocal("tailscale", tsArgs, timeoutSec * 1000);
-    const out = (res.stdout + res.stderr).trim();
-    return out || `(exited ${res.code}, no output)`;
+    return `SSH to ${SERVER_USER}@${SERVER_HOST}:${SERVER_SSH_PORT} exited with status ${res.code}: ${out || "no output"}`;
   } catch (err: any) {
-    return `SSH execution failed: ${err?.message || err}`;
+    return `SSH to ${SERVER_USER}@${SERVER_HOST}:${SERVER_SSH_PORT} failed: ${err?.message || err}`;
   }
 }
 
@@ -1881,7 +1876,7 @@ const MCP_TOOLS: MCPToolDef[] = [
         const data = await orgGet("/status", {}, pc);
         return `✅ '${pc}' reachable via ${SERVER_HOST} → loopback:${resolvePC(pc).port}\nVersion : ${data.version || "?"}\nPlatform: ${data.platform || "?"}`;
       } catch (e: any) {
-        return `❌ Could not reach organiser agent '${pc}': ${e.message}\n\nChecklist:\n  1. Is organiser-agent.exe running on that PC?\n  2. Is pc-tunnel@${pc}.service active on the Linux server?\n  3. Is the Linux server reachable over Tailscale?`;
+        return `❌ Could not reach organiser agent '${pc}': ${e.message}\n\nChecklist:\n  1. Is organiser-agent.exe running on that PC?\n  2. Is pc-tunnel@${pc}.service active on the Linux server?\n  3. Are SERVER_HOST and SERVER_SSH_PORT reachable from this service over SSH?`;
       }
     },
   },

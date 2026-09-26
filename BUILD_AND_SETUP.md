@@ -248,8 +248,8 @@ Claude (claude.ai)
     │ HTTPS
     ▼
 Render (codespaces-mcp)
-    │ SSH via Tailscale  (tailscale ssh — same channel for every
-    │                     server_* tool AND every pc_* tool)
+    │ ordinary key-based SSH (same channel for every server_* tool
+    │                         AND every pc_* tool)
     ▼
 stoni-room-serve (Linux)
     │ curl http://127.0.0.1:<that PC's port>/...
@@ -260,11 +260,10 @@ organiser-agent.exe on that PC
 ```
 
 No PC is ever publicly reachable, and Render never opens a raw connection
-to any PC or even to the server's public/Tailscale IP for this traffic —
-only the one already-authenticated `tailscale ssh` channel is used, for
-everything. Only the Linux server needs to be reachable (via Tailscale).
-Full detail (including exactly how a request is packaged for that SSH
-channel) is in `ARCHITECTURE.md`.
+to any PC. Render connects to the Linux server's configured hostname/IP
+and SSH TCP port; ensure that port is reachable through the server firewall
+and any required router forwarding. PC requests then use loopback-only
+tunnels on the Linux server. Full detail is in `ARCHITECTURE.md`.
 
 ---
 

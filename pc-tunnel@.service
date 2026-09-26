@@ -11,9 +11,9 @@
 # PC's organiser-agent.
 #
 # Binding to 127.0.0.1 (not 0.0.0.0) is deliberate and safe: Render never
-# connects to this port directly. It reaches it by SSHing into this
-# server (tailscale ssh) and curling 127.0.0.1:<port> FROM here — so
-# nothing outside this machine needs to reach this port at all.
+# connects to this port directly. It reaches it by SSHing into this server
+# and curling 127.0.0.1:<port> FROM here — so nothing outside this machine
+# needs to reach this port at all.
 #
 # Setup, per PC:
 #   1. sudo mkdir -p /etc/pc-tunnel
@@ -47,8 +47,7 @@
 
 [Unit]
 Description=SSH tunnel to organiser-agent on PC '%i'
-After=network.target tailscaled.service
-Wants=tailscaled.service
+After=network.target
 
 [Service]
 User=sepisotoni

@@ -8,7 +8,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     iproute2 \
     netcat-openbsd \
     ncat \
-    && curl -fsSL https://tailscale.com/install.sh | sh \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
         -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -27,4 +26,3 @@ RUN chmod +x start.sh
 ENV PORT=8000
 EXPOSE 8080
 CMD ["./start.sh"]
-

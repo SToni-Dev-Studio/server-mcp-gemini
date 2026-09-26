@@ -44,9 +44,9 @@ Render (codespaces-mcp — Python/FastMCP)
       │
       ├── GitHub API  ──────────────────► GitHub Codespaces (gh CLI over SSH)
       │
-      ├── SSH (Tailscale)  ────────────► Linux home server  (stoni-room-serve)
-      │         (tailscale ssh — one authenticated channel, reused for
-      │          every server_* tool AND every pc_* tool)
+      ├── SSH  ────────────────────────► Linux home server  (stoni-room-serve)
+      │         (key-based SSH; reused for every server_* tool AND
+      │          every pc_* tool)
       │                                       │
       │                                       ├── curl 127.0.0.1:<port A> ──► PC "desktop"
       │                                       ├── curl 127.0.0.1:<port B> ──► PC "laptop"
@@ -57,10 +57,10 @@ Render (codespaces-mcp — Python/FastMCP)
 ```
 
 **Key facts:**
-- Server is `stoni-room-serve` (Ubuntu, always-on, Tailscale IP)
-- Render never opens a raw connection to any PC, or even to the server's
-  public IP for PC traffic — everything folds into the one `tailscale ssh`
-  channel. Every server-side PC tunnel is loopback-only (127.0.0.1).
+- Server is `stoni-room-serve` (Ubuntu, always-on, reachable at the
+  configured `SERVER_HOST:SERVER_SSH_PORT` over ordinary SSH).
+- Render never opens a raw connection to any PC; PC traffic is relayed
+  through the Linux server's loopback-only tunnels over the SSH session.
 - Multiple PCs are configured via the `PCS` env var (a JSON registry);
   every `pc_*` tool and `file_transfer`'s `pc:` addresses take a PC name
   (default `"default"` when a tool has an optional `pc` parameter).
@@ -118,7 +118,8 @@ codespace), use `file_transfer` (Group 4) instead of a dedicated
 
 ## Group 2 — Linux Server Tools
 
-SSH via Tailscale. Server: `stoni-room-serve` (Ubuntu, always-on).
+SSH to `stoni-room-serve` (Ubuntu, always-on) using its configured
+hostname/IP, TCP port, and SSH key.
 
 | Tool | What it does |
 |------|-------------|
@@ -357,7 +358,7 @@ server_run_command("nohup python3 /home/sepisotoni/script.py > /tmp/out.log 2>&1
 |-------|-------|-----|
 | PC tool error / empty response | organiser-agent not running, or its tunnel is down | `pc_organiser_status(pc)` for a checklist; ask user to check Task Scheduler on that PC and `systemctl status pc-tunnel@<name>` on the server |
 | `Unknown PC 'x'` | `pc` name not in the `PCS` registry | `pc_list_configured()` to see valid names |
-| Server SSH timeout | Server offline or Tailscale down | `server_run_command("tailscale status")` first, or `run_diagnostics()` |
+| Server SSH timeout | SSH host/port unreachable or server offline | Check `SERVER_HOST`, `SERVER_SSH_PORT`, firewall/NAT port forwarding, and `run_diagnostics()` |
 | Codespace first-command timeout | Codespace waking up | Retry once after 30s |
 | Codespace 404 on a known name | Codespace registration expired/stale | Try another known codespace, or `create_codespace` a fresh one |
 | `Invalid Host header` on `/mcp` | `MCP_ALLOWED_HOST` not set in Render | Set to the Render external hostname (no https://) |
@@ -381,9 +382,9 @@ server_run_command("nohup python3 /home/sepisotoni/script.py > /tmp/out.log 2>&1
 | `ADMIN_PASSWORD` | Password for the `/admin` dashboard (falls back to `MCP_SERVER_PASSWORD` if unset) |
 | `RENDER_API_KEY` | Lets `/admin` manage this service's env vars + trigger redeploys |
 | `RENDER_SERVICE_ID` | Optional — defaults to this service already |
-| `TAILSCALE_AUTH_KEY` | Tailscale ephemeral key for server SSH |
 | `SSH_PRIVATE_KEY` | Private key for SSH to `stoni-room-serve` |
-| `SERVER_HOST` | Tailscale IP of `stoni-room-serve` |
+| `SERVER_HOST` | Publicly reachable hostname/IP for `stoni-room-serve` |
+| `SERVER_SSH_PORT` | SSH TCP port on `stoni-room-serve` (default `22`) |
 | `SERVER_USER` | `sepisotoni` |
 | `PCS` | JSON registry of PCs, e.g. `{"desktop": {"port": 7842, "secret": "..."}}` — see §Group 1 |
 | `MCP_ALLOWED_HOST` | Render external hostname (auto-detected on Render) |
@@ -460,7 +461,7 @@ Or use `scripts/install-organiser-agent.ps1`, which does the build-fetch
 ### How traffic reaches it (no ngrok, any number of PCs)
 ```
 Render (server.py)
-  └─► tailscale ssh → stoni-room-serve
+  └─► SSH → stoni-room-serve
         └─► curl http://127.0.0.1:<this PC's port>/...
               └─► pc-tunnel@<name>.service (loopback-only forward)
                     └─► organiser-agent.exe on that PC
