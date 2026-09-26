@@ -46,65 +46,20 @@ jobs:
         id: deb
         run: |
           DEB=$(find packaging -maxdepth 1 -name "*.deb" | head -1)
+          if [ -z "$DEB" ]; then
+            echo "ERROR: No .deb file found in packaging/"
+            find . -name "*.deb" 2>/dev/null || true
+            exit 1
+          fi
           echo "DEB_PATH=$DEB" >> $GITHUB_OUTPUT
           echo "DEB_NAME=$(basename $DEB)" >> $GITHUB_OUTPUT
-          echo "SHA256=$(cat ${DEB}.sha256 2>/dev/null || sha256sum $DEB | cut -d' ' -f1)" >> $GITHUB_OUTPUT
-          echo "Found: $DEB"
+          SHA=$(sha256sum $DEB | cut -d' ' -f1)
+          echo "SHA256=$SHA" >> $GITHUB_OUTPUT
+          echo "Found: $DEB (sha256: $SHA)"
 
-      - name: Generate install script
+      - name: Stamp version into install.sh
         run: |
-          VERSION=${{ steps.version.outputs.VERSION }}
-          DEB_NAME=${{ steps.deb.outputs.DEB_NAME }}
-          SHA256=${{ steps.deb.outputs.SHA256 }}
-          BASE_URL="https://github.com/${{ github.repository }}/releases/download/v${VERSION}"
-
-          cat > install.sh << INSTALLEOF
-#!/bin/bash
-set -e
-echo "Installing mcp-hub-tools v${VERSION}..."
-
-# Download .deb
-curl -fsSL "${BASE_URL}/${DEB_NAME}" -o /tmp/${DEB_NAME}
-
-# Verify checksum
-echo "${SHA256}  /tmp/${DEB_NAME}" | sha256sum -c -
-
-# Install
-sudo dpkg -i /tmp/${DEB_NAME}
-sudo apt-get install -f -y
-
-# Prompt for config
-echo ""
-echo "Configuration required:"
-read -p "MCP Server URL (e.g. https://server-mcp-gemini.onrender.com): " MCP_URL
-read -p "MCP Password: " -s MCP_PASSWORD
-echo ""
-read -p "Linux server hostname or IP: " SERVER_HOST
-read -p "Linux server SSH user (default: sepisotoni): " SERVER_USER
-SERVER_USER=\${SERVER_USER:-sepisotoni}
-
-# Write config
-sudo mkdir -p /etc/mcp-hub-tools
-sudo tee /etc/mcp-hub-tools/config.env > /dev/null << CONFEOF
-MCP_SERVER_URL=\${MCP_URL}
-MCP_PASSWORD=\${MCP_PASSWORD}
-SERVER_HOST=\${SERVER_HOST}
-SERVER_USER=\${SERVER_USER}
-CONFEOF
-sudo chmod 600 /etc/mcp-hub-tools/config.env
-
-# Enable services
-sudo systemctl daemon-reload
-sudo systemctl enable --now hub-monitor.service
-sudo systemctl enable --now hub-poll.timer
-sudo systemctl enable --now mcp-hub-tools-autoupdate.timer
-
-echo ""
-echo "mcp-hub-tools v${VERSION} installed!"
-echo "  hub-cli --help"
-echo "  hub-diagnostics --help"
-echo "  hub-monitor status"
-INSTALLEOF
+          sed -i 's|VERSION="${1:-.*}"|VERSION="${1:-${{ steps.version.outputs.VERSION }}}"|' install.sh
           chmod +x install.sh
 
       - name: Create GitHub Release
@@ -117,14 +72,14 @@ INSTALLEOF
 
             ### One-line install
             ```bash
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.VERSION }}/install.sh | sudo bash
+            curl -fsSL https://github.com/SToni-Dev-Studio/server-mcp-gemini/releases/download/v${{ steps.version.outputs.VERSION }}/install.sh | sudo bash
             ```
 
-            ### What's included
-            - `hub-cli` — manage PC tunnel config and Render env vars
-            - `hub-diagnostics` — local health checks and connectivity tests
-            - `hub-monitor` — PC self-registration listener + 5-min poll daemon
-            - systemd units: `hub-monitor.service`, `hub-poll.timer`, `mcp-hub-tools-autoupdate.timer`
+            ### Whats included
+            - hub-cli: manage PC tunnel config and Render env vars
+            - hub-diagnostics: local health checks and connectivity tests
+            - hub-monitor: PC self-registration listener + 5-min poll daemon
+            - systemd units: hub-monitor.service, hub-poll.timer
 
             ### SHA256
             `${{ steps.deb.outputs.SHA256 }}`
